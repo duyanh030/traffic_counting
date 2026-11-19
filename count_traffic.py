@@ -1,10 +1,13 @@
-import cv2
+import argparse
 import os
 import re
+from pathlib import Path
+import cv2
 from ultralytics import YOLO
 import supervision as sv
 
 import config
+from candidate_detector import CandidateDetector
 
 # Optimize RTSP streaming over TCP to prevent packet loss / tearing over Wi-Fi
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -15,24 +18,66 @@ def mask_url(url: str) -> str:
     return re.sub(r":([^@]+)@", ":****@", url)
 
 
-def main():
-    print(f"Connecting to camera: {mask_url(config.RTSP_URL)}")
-    print(f"Initializing model '{config.MODEL_NAME}' with Native ByteTrack...")
-    model = YOLO(config.MODEL_NAME)
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Real-time Traffic Counting & Active Learning Candidate Capture")
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=config.RTSP_URL,
+        help="Input source: file path to an MP4 video or RTSP URL (default: config.RTSP_URL)",
+    )
+    parser.add_argument(
+        "--save-candidates",
+        action="store_true",
+        default=True,
+        help="Automatically capture suspicious frames (low confidence, track loss) for active learning (default: True)",
+    )
+    parser.add_argument(
+        "--no-candidates",
+        dest="save_candidates",
+        action="store_false",
+        help="Disable automatic candidate snapshot capture",
+    )
+    parser.add_argument(
+        "--no-view",
+        action="store_true",
+        help="Run in headless mode without displaying the GUI window (useful for servers or batch video processing)",
+    )
+    return parser.parse_args()
 
-    cap = cv2.VideoCapture(config.RTSP_URL, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+def main():
+    args = parse_arguments()
+    source = args.source
+    is_video_file = Path(source).is_file()
+
+    if is_video_file:
+        print(f"🎬 Processing video file: {source}")
+        cap = cv2.VideoCapture(source)
+    else:
+        print(f"📡 Connecting to live camera stream: {mask_url(source)}")
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     if not cap.isOpened():
-        print(f"Error: Unable to connect to RTSP stream: {mask_url(config.RTSP_URL)}")
+        print(f"❌ Error: Unable to open video source: {mask_url(source)}")
         return
 
+    # Read first frame to determine video dimensions
     ret, frame = cap.read()
     if not ret:
-        print("Failed to read the first frame from the camera stream.")
+        print("❌ Error: Failed to read the first frame from the source.")
         return
 
     height, width, _ = frame.shape
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if is_video_file else 0
+
+    print(f"Resolution: {width}x{height} | Total video frames: {total_frames or 'Live Stream'}")
+    print(f"Initializing YOLO model '{config.MODEL_NAME}' with ByteTrack...")
+    model = YOLO(config.MODEL_NAME)
+
+    # Initialize CandidateDetector for Active Learning
+    candidate_detector = CandidateDetector() if args.save_candidates else None
 
     # Set horizontal counting line based on configured height percentage
     line_y = int(height * config.COUNTING_LINE_POSITION)
@@ -47,15 +92,25 @@ def main():
     line_annotator = sv.LineZoneAnnotator(thickness=3, text_thickness=2, text_scale=0.8)
 
     print(">>> System is running! Press 'q' on the video window to stop.")
+    frame_idx = 0
+
+    # Process first frame that was already read
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("Waiting for camera feed...")
-            continue
+            if is_video_file:
+                print("\n✅ Video playback completed.")
+                break
+            else:
+                print("Waiting for camera feed...")
+                continue
 
-        # Use built-in YOLO tracking (ByteTrack)
-        # persist=True maintains track IDs across consecutive frames
+        frame_idx += 1
+        clean_frame = frame.copy()
+
+        # Run YOLO tracking with ByteTrack
         results = model.track(
             frame,
             persist=True,
@@ -63,21 +118,32 @@ def main():
             classes=config.VEHICLE_CLASSES,
             conf=config.CONFIDENCE_THRESHOLD,
             imgsz=config.IMAGE_SIZE,
-            verbose=False
+            verbose=False,
         )[0]
 
-        # Convert results to Supervision format
+        # Convert detections to Supervision format
         detections = sv.Detections.from_ultralytics(results)
 
-        # Process when tracked objects are detected
-        if detections.tracker_id is not None:
+        # Active Learning: Detect potential errors (track loss, low confidence)
+        if candidate_detector is not None:
+            candidate_detector.process_frame(
+                frame=clean_frame,
+                frame_idx=frame_idx,
+                detections=detections,
+                model_names=model.names,
+            )
+
+        # Process vehicle tracking and line counting
+        if detections.tracker_id is not None and len(detections) > 0:
             # 1. Trigger counting line
             line_zone.trigger(detections)
 
             # 2. Format labels with tracking IDs and class names
             labels = [
-                f"#{tracker_id} {model.names[class_id]}"
-                for class_id, tracker_id in zip(detections.class_id, detections.tracker_id)
+                f"#{tracker_id} {model.names[class_id]} {conf:.2f}"
+                for class_id, tracker_id, conf in zip(
+                    detections.class_id, detections.tracker_id, detections.confidence
+                )
             ]
 
             annotated_frame = box_annotator.annotate(scene=frame.copy(), detections=detections)
@@ -88,14 +154,25 @@ def main():
         # Draw counting line and IN/OUT counters
         line_annotator.annotate(frame=annotated_frame, line_counter=line_zone)
 
-        # Display window
-        cv2.imshow("Traffic Counting System - RTSP Camera", annotated_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # Display window (unless running in headless mode)
+        if not args.no_view:
+            cv2.imshow("Traffic Counting & Active Learning", annotated_frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("\n⏹️ Stopped by user.")
+                break
 
     cap.release()
-    cv2.destroyAllWindows()
-    print(f"\n--- SUMMARY: Vehicles IN: {line_zone.in_count} | Vehicles OUT: {line_zone.out_count} ---")
+    if not args.no_view:
+        cv2.destroyAllWindows()
+
+    print("\n" + "=" * 60)
+    print("📊 FINAL SUMMARY")
+    print(f"   • Total frames processed : {frame_idx}")
+    print(f"   • Vehicles IN            : {line_zone.in_count}")
+    print(f"   • Vehicles OUT           : {line_zone.out_count}")
+    if candidate_detector is not None:
+        print(f"   • Suspicious snapshots   : {candidate_detector.total_candidates_saved} (Saved in {config.CANDIDATES_DIR})")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":

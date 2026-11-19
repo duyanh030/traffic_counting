@@ -1,0 +1,27 @@
+# Virtual environment
+venv/
+env/
+.env/
+
+# IDE
+.idea/
+.vscode/
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# YOLO weights & cache
+yolov8n/
+*.pt
+
+# Sensitive environment configs
+.env
+
+# Active Learning candidate snapshots
+candidates/
+
+# Office temp files
+*.ods
+.~lock.*

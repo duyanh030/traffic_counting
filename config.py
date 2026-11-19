@@ -54,3 +54,11 @@ MODEL_NAME = os.getenv("MODEL_NAME", "yolov8n.pt")
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 IMAGE_SIZE = int(os.getenv("IMAGE_SIZE", "640"))
 COUNTING_LINE_POSITION = float(os.getenv("COUNTING_LINE_POSITION", "0.6"))
+
+# Candidate Detector / Active Learning parameters
+CANDIDATES_DIR = BASE_DIR / "candidates"
+LOW_CONF_MIN = float(os.getenv("LOW_CONF_MIN", "0.20"))
+LOW_CONF_MAX = float(os.getenv("LOW_CONF_MAX", "0.38"))
+TRACK_LOSS_MIN_FRAMES = int(os.getenv("TRACK_LOSS_MIN_FRAMES", "5"))
+SNAPSHOT_COOLDOWN_FRAMES = int(os.getenv("SNAPSHOT_COOLDOWN_FRAMES", "30"))
+BORDER_MARGIN_PIXELS = int(os.getenv("BORDER_MARGIN_PIXELS", "35"))
