@@ -1,6 +1,8 @@
+import csv
 import cv2
 import json
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Any, Optional
 import numpy as np
@@ -17,13 +19,13 @@ class CandidateDetector:
 
     def __init__(
         self,
-        candidates_dir: Optional[Path] = None,
+        run_candidates_dir: Optional[Path] = None,
         low_conf_range: tuple = (config.LOW_CONF_MIN, config.LOW_CONF_MAX),
         track_loss_min_frames: int = config.TRACK_LOSS_MIN_FRAMES,
         cooldown_frames: int = config.SNAPSHOT_COOLDOWN_FRAMES,
         border_margin: int = config.BORDER_MARGIN_PIXELS,
     ):
-        self.candidates_dir = Path(candidates_dir or config.CANDIDATES_DIR)
+        self.candidates_dir = Path(run_candidates_dir or config.CANDIDATES_DIR)
         self.img_dir = self.candidates_dir / "images"
         self.preview_dir = self.candidates_dir / "previews"
         self.meta_dir = self.candidates_dir / "metadata"
@@ -43,6 +45,10 @@ class CandidateDetector:
         # Cooldown registry to avoid spamming snapshots for the same object
         self.cooldown_registry: Dict[str, int] = {}
         self.total_candidates_saved = 0
+
+        # Detailed breakdown statistics for the final report
+        self.stats_by_reason: Counter = Counter()
+        self.stats_by_class: Counter = Counter()
 
     def is_near_border(self, bbox: np.ndarray, frame_shape: tuple) -> bool:
         """Check if bounding box [x1, y1, x2, y2] is near frame borders (natural exit)."""
@@ -133,6 +139,10 @@ class CandidateDetector:
             json.dump(metadata, f, indent=2)
 
         self.total_candidates_saved += 1
+        self.stats_by_reason[reason] += 1
+        class_name = details.get("class_name", "unknown")
+        self.stats_by_class[class_name] += 1
+
         print(f"⚠️ [Candidate Captured] ID: {candidate_id} | Reason: {reason} | Total: {self.total_candidates_saved}")
         return candidate_id
 
@@ -236,3 +246,100 @@ class CandidateDetector:
         ]
         for tid in expired_ids:
             del self.active_tracks[tid]
+
+    def save_run_report(
+        self,
+        source: str,
+        source_name: str,
+        model_name: str,
+        start_time_str: str,
+        end_time_str: str,
+        duration_seconds: float,
+        total_frames: int,
+        vehicles_in: int,
+        vehicles_out: int,
+    ) -> Dict[str, Any]:
+        """
+        Generate and save a detailed run report for this specific execution session,
+        as well as appending to the global history log and CSV summary.
+        """
+        clean_source_path = source if not source.startswith("rtsp://") else "rtsp://[camera_stream]"
+        fps_avg = round(total_frames / duration_seconds, 2) if duration_seconds > 0 else 0
+
+        report_data = {
+            "run_id": self.candidates_dir.name,
+            "source_name": source_name,
+            "source_path": clean_source_path,
+            "model_version": model_name,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "duration_seconds": round(duration_seconds, 2),
+            "total_frames_processed": total_frames,
+            "fps_average": fps_avg,
+            "counting_summary": {
+                "vehicles_in": vehicles_in,
+                "vehicles_out": vehicles_out,
+                "total_vehicles_counted": vehicles_in + vehicles_out,
+            },
+            "suspicious_snapshots_summary": {
+                "total_captured": self.total_candidates_saved,
+                "breakdown_by_reason": dict(self.stats_by_reason),
+                "breakdown_by_class": dict(self.stats_by_class),
+            },
+            "candidates_directory": str(self.candidates_dir),
+        }
+
+        # 1. Save specific run_report.json inside this run's folder
+        report_path = self.candidates_dir / "run_report.json"
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report_data, f, indent=2)
+
+        # 2. Update global reports/runs_history.json
+        reports_dir = config.REPORTS_DIR
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        history_file = reports_dir / "runs_history.json"
+        history = []
+        if history_file.is_file():
+            try:
+                with open(history_file, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+        history.append(report_data)
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+
+        # 3. Update global CSV summary for easy spreadsheet analysis
+        csv_file = reports_dir / "runs_history.csv"
+        file_exists = csv_file.is_file()
+        with open(csv_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow([
+                    "run_id",
+                    "source_name",
+                    "model_version",
+                    "start_time",
+                    "end_time",
+                    "duration_sec",
+                    "total_frames",
+                    "vehicles_in",
+                    "vehicles_out",
+                    "suspicious_snapshots",
+                    "candidates_dir",
+                ])
+            writer.writerow([
+                report_data["run_id"],
+                report_data["source_name"],
+                report_data["model_version"],
+                report_data["start_time"],
+                report_data["end_time"],
+                report_data["duration_seconds"],
+                report_data["total_frames_processed"],
+                vehicles_in,
+                vehicles_out,
+                self.total_candidates_saved,
+                str(self.candidates_dir),
+            ])
+
+        return report_data

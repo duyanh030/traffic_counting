@@ -19,8 +19,15 @@ yolov8n/
 # Sensitive environment configs
 .env
 
-# Active Learning candidate snapshots
+# Active Learning candidate snapshots & run reports
 candidates/
+reports/
+
+# Video samples & data files
+sample_video/
+*.mp4
+*.avi
+*.mkv
 
 # Office temp files
 *.ods
