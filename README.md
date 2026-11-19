@@ -29,12 +29,12 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
            │ (Push Approved Candidates)
            ▼
 ┌──────────────────────────────────────────────┐
-│  CVAT Server (cvat_integration.py)           │ ──► Auto Task Creation & Image Upload
+│  CVAT Server (cvat_integration.py)           │ ──► Auto Task Creation + AI Pre-Annotation
 └──────────┬───────────────────────────────────┘
-           │ (Annotation & Dataset Export)
+           │ (Human Labeling & Dataset Export)
            ▼
 ┌──────────────────────────────────────────────┐
-│  Retraining Pipeline (retrain.py - Step 4)   │ ──► Fine-tune -> Benchmark Gate -> Deploy
+│  retrain.py (Step 4: Continuous Training)    │ ──► Ingest -> Mosaic/HSV Aug -> Gate -> Deploy
 └──────────────────────────────────────────────┘
 ```
 
@@ -58,12 +58,13 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
 - **1-Click CVAT Integration (`cvat_integration.py` & `push_to_cvat.py`):**
   - Directly authenticates with self-hosted CVAT (`http://localhost:8080`) via REST API v2.
   - Automatically creates tasks with vehicle label categories (`car`, `motorcycle`, `bus`, `truck`).
-  - Seamlessly uploads approved candidate images packaged in a zip archive.
-  - Provides offline local ZIP export fallback for manual import.
-- **Partitioned Execution Sessions & Reports:**
-  - Candidates are organized into distinct folders by **model version** and **timestamped run session** (`candidates/<model>/run_<source>_<timestamp>/`).
-  - Automated generation of session-specific `run_report.json` and global history logs (`reports/runs_history.json` and `reports/runs_history.csv`).
-- **Secure Configuration:** Sensitive camera and CVAT credentials (URL, username, password) are kept in `.env` and never tracked by Git.
+  - **AI Pre-Annotation:** Automatically runs YOLO to pre-draw bounding boxes for obvious vehicles, saving ~85% annotation time.
+- **Automated Retraining & Quality Gate (`retrain.py` & `dataset_manager.py`):**
+  - Ingests CVAT YOLO 1.1 zip exports and manages 80/20 train/val dataset splits.
+  - Advanced Data Augmentation: Mosaic (4-grid cross-stitching), MixUp, HSV lighting shifts, 3D perspective, and rotation.
+  - **Two-Tier Quality Gate:** Evaluates validation $mAP@0.5 \ge 0.60$ and recall before model promotion.
+  - **Zero-Downtime Hot Reload:** Automatically promotes validated weights to `models/yolov8_traffic_latest.pt` and increments version (`v1.0.0` -> `v1.1.0`).
+  - **Automated Rollback:** Rejects inferior weights and preserves production stability if Quality Gate fails.
 
 ---
 
@@ -72,109 +73,62 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
 ```text
 traffic_counting/
 ├── config.py             # Centralized project configuration module
-├── candidate_detector.py # Active Learning: track-loss, uncertainty snapshot & reporting engine
+├── candidate_detector.py # Active Learning: track-loss & uncertainty snapshot engine
 ├── count_traffic.py      # Main vehicle tracking, counting, and candidate capture
 ├── app.py                # Streamlit Web Studio for candidate review and CVAT push
 ├── cvat_integration.py   # CVAT REST API client & task upload pipeline
 ├── push_to_cvat.py       # Standalone CLI script to push approved candidates to CVAT
+├── dataset_manager.py    # CVAT export zip ingestion & train/val split manager
+├── retrain.py            # Step 4: Fine-tuning, Data Augmentation & Quality Gate
+├── models/               # Model registry & version tracking
+│   ├── version.json      # Semantic version history and validation metrics
+│   └── yolov8_traffic_latest.pt # Active production model pointer
+├── dataset/              # Training & validation splits (ignored by git)
+│   ├── train/            # images/ and labels/
+│   ├── val/              # images/ and labels/
+│   └── traffic_data.yaml # YOLO dataset definition
 ├── test_rtsp.py          # Diagnostic utility to verify RTSP stream connectivity
 ├── .env.example          # Template for environment variables (committed to git)
 ├── .env                  # Local credentials and settings (ignored by git)
 ├── candidates/           # Auto-generated candidate snapshots per run (ignored by git)
-│   └── <model_version>/  # e.g., yolov8n
-│       └── run_<source>_<timestamp>/
-│           ├── run_report.json  # Comprehensive run execution report
-│           ├── images/          # Pristine frames for CVAT annotation
-│           ├── previews/        # Highlighted frames for fast human review
-│           └── metadata/        # JSON metadata for each candidate
 ├── reports/              # Global execution tracking & exports (ignored by git)
-│   ├── runs_history.json # JSON log of all historical runs
-│   └── runs_history.csv  # CSV summary log for easy spreadsheet analysis
 ├── .gitignore            # Git ignore rules for caches, weights, venv, candidates, reports
 └── README.md             # Project documentation
 ```
 
 ---
 
-## Installation & Setup
+## Complete End-to-End Workflow
 
-1. **Clone the repository:**
-   ```bash
-   git clone git@github.com:duyanh030/traffic_counting.git
-   cd traffic_counting
-   ```
-
-2. **Create and activate a virtual environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. **Install dependencies:**
-   ```bash
-   pip install opencv-python ultralytics supervision streamlit requests
-   ```
-
-4. **Configure your camera and CVAT credentials:**
-   Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` with your RTSP camera and CVAT server settings:
-   ```env
-   # RTSP Camera
-   RTSP_USERNAME=admin
-   RTSP_PASSWORD=your_camera_password
-   RTSP_IP=192.168.1.100
-   RTSP_PORT=554
-   RTSP_PATH=/
-
-   # CVAT Server
-   CVAT_URL=http://localhost:8080
-   CVAT_USERNAME=admin
-   CVAT_PASSWORD=your_cvat_password
-   ```
-
----
-
-## Usage Guide
-
-### 1. Run Vehicle Counting on Video or RTSP Stream
+### Step 1: Run Traffic Counting & Capture Error Candidates
 ```bash
-# On an MP4 video file
+# Process an MP4 video (or leave --source empty for live RTSP)
 python count_traffic.py --source sample_video/EU.mp4
-
-# On a live RTSP stream
-python count_traffic.py
-
-# Headless server mode
-python count_traffic.py --source sample_video/EU.mp4 --no-view
 ```
 
-### 2. Launch Review Studio (Streamlit Web UI)
+### Step 2: Review & Triage in Streamlit Web Studio
 ```bash
 streamlit run app.py
 ```
-Open your browser at `http://localhost:8501`.
-- Review candidate snapshots in **Gallery View** or **Detail Inspector**.
-- Click **✅ Approve** for valuable error cases (occlusions, misclassifications, ambiguous vehicles).
+- Open `http://localhost:8501`.
+- Inspect candidates in **Gallery View** or **Detail Inspector**.
+- Click **✅ Approve** on genuine errors (occluded vehicles, ambiguous classes, missed detections).
 
-### 3. Push Approved Candidates to CVAT (Step 3)
+### Step 3: Push Approved Candidates to CVAT
+- On Streamlit, switch to the **"🚀 Push to CVAT"** tab.
+- Click **[🚀 Push to CVAT Now]** (with Auto Pre-annotate enabled).
+- Click the direct link to open the task in CVAT: all obvious vehicles are already pre-drawn!
+- Fix the missing/mistaken vehicle and press **`Ctrl + S`**.
+- Export dataset from CVAT: **Actions -> Export task dataset -> YOLO 1.1 (Save images checked)**.
 
-**Option A: 1-Click via Streamlit Web Studio:**
-1. Open the **"🚀 Push to CVAT"** tab in the Streamlit UI.
-2. Confirm the CVAT credentials and task name.
-3. Click **[🚀 Push to CVAT Now]**.
-4. Click the direct link generated on screen to open the task in CVAT and start labeling!
-
-**Option B: Via Command Line (CLI):**
+### Step 4: Retrain, Quality Gate & Auto-Deploy
+Run the automated retraining engine on the exported CVAT zip:
 ```bash
-# Push approved candidates from default candidates folder
-python push_to_cvat.py
-
-# Push approved candidates from a specific run session
-python push_to_cvat.py --run-dir candidates/yolov8n/run_EU_20261119_100948
-
-# Export to a local ZIP archive instead (Offline mode)
-python push_to_cvat.py --export-zip-only reports/approved_dataset.zip
+python retrain.py --zip /path/to/task_traffic_yolo_1.1.zip --epochs 30
 ```
+- If Quality Gate passes ($mAP@0.5 \ge 0.60$):
+  - Model is automatically promoted to `models/yolov8_traffic_latest.pt`.
+  - Version updated in `models/version.json` (`v1.1.0`).
+  - Next time you run `count_traffic.py`, the new improved model is loaded automatically!
+- If Quality Gate fails:
+  - System automatically executes rollback and keeps the existing stable model.

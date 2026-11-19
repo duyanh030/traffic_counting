@@ -50,7 +50,9 @@ RTSP_URL = build_rtsp_url()
 VEHICLE_CLASSES = [2, 3, 5, 7]
 
 # Detection & Tracking parameters
-MODEL_NAME = os.getenv("MODEL_NAME", "yolov8n.pt")
+LATEST_MODEL_PATH = BASE_DIR / "models" / "yolov8_traffic_latest.pt"
+DEFAULT_MODEL = str(LATEST_MODEL_PATH) if LATEST_MODEL_PATH.is_file() else "yolov8n.pt"
+MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL)
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 IMAGE_SIZE = int(os.getenv("IMAGE_SIZE", "640"))
 COUNTING_LINE_POSITION = float(os.getenv("COUNTING_LINE_POSITION", "0.6"))

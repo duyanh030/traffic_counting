@@ -23,6 +23,10 @@ yolov8n/
 candidates/
 reports/
 
+# Datasets & Training logs
+dataset/
+runs/
+
 # Video samples & data files
 sample_video/
 *.mp4

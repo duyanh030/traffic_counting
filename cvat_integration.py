@@ -84,12 +84,34 @@ class CVATClient:
         task_url = f"{self.base_url}/tasks/{task_id}"
         task_data["web_url"] = task_url
 
-        # Build label name -> label ID mapping
+        # Build label name -> label ID mapping robustly across different CVAT versions
         label_map = {}
-        for lbl in task_data.get("labels", []):
-            label_map[lbl["name"]] = lbl["id"]
-        task_data["label_map"] = label_map
+        raw_labels = task_data.get("labels", [])
 
+        # In CVAT API v2, labels can be a dict (e.g. {"count": 4, "results": [...]})
+        if isinstance(raw_labels, dict):
+            raw_labels = raw_labels.get("results", [])
+
+        if isinstance(raw_labels, list):
+            for lbl in raw_labels:
+                if isinstance(lbl, dict) and "name" in lbl and "id" in lbl:
+                    label_map[lbl["name"]] = lbl["id"]
+
+        # If label_map is still empty, fetch directly from /api/labels?task_id={task_id}
+        if not label_map:
+            try:
+                lbl_resp = self.session.get(f"{self.base_url}/api/labels?task_id={task_id}", timeout=10)
+                if lbl_resp.status_code == 200:
+                    lbl_json = lbl_resp.json()
+                    items = lbl_json.get("results", lbl_json) if isinstance(lbl_json, dict) else lbl_json
+                    if isinstance(items, list):
+                        for lbl in items:
+                            if isinstance(lbl, dict) and "name" in lbl and "id" in lbl:
+                                label_map[lbl["name"]] = lbl["id"]
+            except Exception as e:
+                print(f"Notice: Could not fetch labels directly: {e}")
+
+        task_data["label_map"] = label_map
         return task_data
 
     def upload_images_zip(self, task_id: int, zip_file_path: Path) -> bool:
@@ -106,7 +128,7 @@ class CVATClient:
 
         return True
 
-    def wait_for_task_ready(self, task_id: int, timeout_sec: int = 60) -> bool:
+    def wait_for_task_ready(self, task_id: int, timeout_sec: int = 45) -> bool:
         """Poll task data status until processing completes on the CVAT server."""
         url = f"{self.base_url}/api/tasks/{task_id}/status"
         start = time.time()
@@ -115,7 +137,7 @@ class CVATClient:
                 resp = self.session.get(url, timeout=10)
                 if resp.status_code == 200:
                     status_info = resp.json()
-                    state = status_info.get("state", "").lower()
+                    state = str(status_info.get("state", "")).lower()
                     if state == "completed":
                         return True
                     if state == "failed":
@@ -287,7 +309,7 @@ def push_approved_to_cvat(
         if enable_pre_annotation and label_map:
             try:
                 # Wait briefly for CVAT to unpack frames
-                client.wait_for_task_ready(task_id=task_id, timeout_sec=30)
+                client.wait_for_task_ready(task_id=task_id, timeout_sec=25)
                 shapes, pre_annotated_boxes_count = generate_pre_annotations(
                     image_paths=exported_paths,
                     label_map=label_map,
