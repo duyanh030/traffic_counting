@@ -1,6 +1,6 @@
 # Real-time Traffic Counting & Active Learning System
 
-An automated, end-to-end traffic detection, tracking, counting, and active learning candidate capture system built with **YOLOv8**, **ByteTrack**, **Roboflow Supervision**, **Streamlit**, and **OpenCV**, supporting both live **RTSP camera feeds** and **MP4 video files**.
+An automated, end-to-end traffic detection, tracking, counting, and active learning candidate capture system built with **YOLOv8**, **ByteTrack**, **Roboflow Supervision**, **CVAT REST API**, **Streamlit**, and **OpenCV**, supporting both live **RTSP camera feeds** and **MP4 video files**.
 
 ---
 
@@ -26,10 +26,15 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
 ┌──────────────────────────────────────────────┐
 │  app.py (Streamlit Review Studio)            │ ──► Human-in-the-loop: Approve / Reject
 └──────────┬───────────────────────────────────┘
-           │ (Export Approved Samples)
+           │ (Push Approved Candidates)
            ▼
 ┌──────────────────────────────────────────────┐
-│  CVAT Annotation & Retraining Pipeline       │ ──► Fine-tune -> Benchmark Gate -> Deploy
+│  CVAT Server (cvat_integration.py)           │ ──► Auto Task Creation & Image Upload
+└──────────┬───────────────────────────────────┘
+           │ (Annotation & Dataset Export)
+           ▼
+┌──────────────────────────────────────────────┐
+│  Retraining Pipeline (retrain.py - Step 4)   │ ──► Fine-tune -> Benchmark Gate -> Deploy
 └──────────────────────────────────────────────┘
 ```
 
@@ -50,10 +55,15 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
   - Filter by review status (Pending / Approved / Rejected), detection reason, and vehicle class.
   - Single-click or batch approval/rejection to prepare datasets for CVAT annotation.
   - Side-by-side inspection of pristine raw frames vs. AI-highlighted preview frames.
+- **1-Click CVAT Integration (`cvat_integration.py` & `push_to_cvat.py`):**
+  - Directly authenticates with self-hosted CVAT (`http://localhost:8080`) via REST API v2.
+  - Automatically creates tasks with vehicle label categories (`car`, `motorcycle`, `bus`, `truck`).
+  - Seamlessly uploads approved candidate images packaged in a zip archive.
+  - Provides offline local ZIP export fallback for manual import.
 - **Partitioned Execution Sessions & Reports:**
   - Candidates are organized into distinct folders by **model version** and **timestamped run session** (`candidates/<model>/run_<source>_<timestamp>/`).
   - Automated generation of session-specific `run_report.json` and global history logs (`reports/runs_history.json` and `reports/runs_history.csv`).
-- **Secure Configuration:** Sensitive camera credentials (IP, username, password, port) are kept in `.env` and never tracked by Git.
+- **Secure Configuration:** Sensitive camera and CVAT credentials (URL, username, password) are kept in `.env` and never tracked by Git.
 
 ---
 
@@ -64,7 +74,9 @@ traffic_counting/
 ├── config.py             # Centralized project configuration module
 ├── candidate_detector.py # Active Learning: track-loss, uncertainty snapshot & reporting engine
 ├── count_traffic.py      # Main vehicle tracking, counting, and candidate capture
-├── app.py                # Streamlit Web Studio for candidate review and approval
+├── app.py                # Streamlit Web Studio for candidate review and CVAT push
+├── cvat_integration.py   # CVAT REST API client & task upload pipeline
+├── push_to_cvat.py       # Standalone CLI script to push approved candidates to CVAT
 ├── test_rtsp.py          # Diagnostic utility to verify RTSP stream connectivity
 ├── .env.example          # Template for environment variables (committed to git)
 ├── .env                  # Local credentials and settings (ignored by git)
@@ -75,7 +87,7 @@ traffic_counting/
 │           ├── images/          # Pristine frames for CVAT annotation
 │           ├── previews/        # Highlighted frames for fast human review
 │           └── metadata/        # JSON metadata for each candidate
-├── reports/              # Global execution tracking (ignored by git)
+├── reports/              # Global execution tracking & exports (ignored by git)
 │   ├── runs_history.json # JSON log of all historical runs
 │   └── runs_history.csv  # CSV summary log for easy spreadsheet analysis
 ├── .gitignore            # Git ignore rules for caches, weights, venv, candidates, reports
@@ -100,87 +112,69 @@ traffic_counting/
 
 3. **Install dependencies:**
    ```bash
-   pip install opencv-python ultralytics supervision streamlit
+   pip install opencv-python ultralytics supervision streamlit requests
    ```
 
-4. **Configure your camera credentials (if using RTSP):**
+4. **Configure your camera and CVAT credentials:**
    Copy `.env.example` to `.env`:
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` with your RTSP camera settings if needed.
+   Edit `.env` with your RTSP camera and CVAT server settings:
+   ```env
+   # RTSP Camera
+   RTSP_USERNAME=admin
+   RTSP_PASSWORD=your_camera_password
+   RTSP_IP=192.168.1.100
+   RTSP_PORT=554
+   RTSP_PATH=/
+
+   # CVAT Server
+   CVAT_URL=http://localhost:8080
+   CVAT_USERNAME=admin
+   CVAT_PASSWORD=your_cvat_password
+   ```
 
 ---
 
 ## Usage Guide
 
-### 1. Test RTSP Camera Connectivity
+### 1. Run Vehicle Counting on Video or RTSP Stream
 ```bash
-python test_rtsp.py
-```
-
-### 2. Run Vehicle Counting on Live RTSP Stream
-```bash
-python count_traffic.py
-```
-
-### 3. Run Vehicle Counting on an MP4 Video File
-```bash
+# On an MP4 video file
 python count_traffic.py --source sample_video/EU.mp4
-```
 
-### 4. Headless Server Mode (Batch Processing)
-Run without displaying the OpenCV GUI window (ideal for servers):
-```bash
+# On a live RTSP stream
+python count_traffic.py
+
+# Headless server mode
 python count_traffic.py --source sample_video/EU.mp4 --no-view
 ```
 
-### 5. Disable Candidate Capture
-If you only need counting metrics without saving snapshot candidates:
-```bash
-python count_traffic.py --source sample_video/EU.mp4 --no-candidates
-```
-
----
-
-## Active Learning Review Studio (Streamlit UI)
-
-To inspect and approve candidates captured during your runs:
-
+### 2. Launch Review Studio (Streamlit Web UI)
 ```bash
 streamlit run app.py
 ```
 Open your browser at `http://localhost:8501`.
+- Review candidate snapshots in **Gallery View** or **Detail Inspector**.
+- Click **✅ Approve** for valuable error cases (occlusions, misclassifications, ambiguous vehicles).
 
-### UI Capabilities:
-1. **Session Selector (Sidebar):** Switch between models (`yolov8n`, etc.) and timestamped execution runs (`run_EU_20261119_...`).
-2. **Metrics Dashboard:** Overview of total captured, pending, approved, and rejected snapshots.
-3. **Filter Bar:** Filter candidates by:
-   - Status (`pending`, `approved`, `rejected`)
-   - Detection reason (`track_loss`, `low_confidence`)
-   - Vehicle class (`car`, `motorcycle`, `bus`, `truck`)
-4. **Batch Approval / Rejection:** Quickly approve or reject all visible filtered candidates with one click.
-5. **Detail Inspector:** Compare pristine raw frames side-by-side with AI-highlighted preview frames and examine full bounding box JSON metadata.
-6. **Execution History:** View global historical statistics from all previous runs (`reports/runs_history.json`).
+### 3. Push Approved Candidates to CVAT (Step 3)
 
----
+**Option A: 1-Click via Streamlit Web Studio:**
+1. Open the **"🚀 Push to CVAT"** tab in the Streamlit UI.
+2. Confirm the CVAT credentials and task name.
+3. Click **[🚀 Push to CVAT Now]**.
+4. Click the direct link generated on screen to open the task in CVAT and start labeling!
 
-## Configuration Reference
+**Option B: Via Command Line (CLI):**
+```bash
+# Push approved candidates from default candidates folder
+python push_to_cvat.py
 
-Settings can be customized directly in your `.env` file or in [config.py](config.py):
+# Push approved candidates from a specific run session
+python push_to_cvat.py --run-dir candidates/yolov8n/run_EU_20261119_100948
 
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `RTSP_USERNAME` | `admin` | Camera RTSP username |
-| `RTSP_PASSWORD` | - | Camera RTSP password |
-| `RTSP_IP` | `127.0.0.1` | Camera local IP address |
-| `RTSP_PORT` | `554` | Camera RTSP port |
-| `MODEL_NAME` | `yolov8n.pt` | YOLO model weights |
-| `CONFIDENCE_THRESHOLD` | `0.35` | Object detection threshold |
-| `IMAGE_SIZE` | `640` | Inference image resolution |
-| `COUNTING_LINE_POSITION` | `0.6` | Height ratio for the virtual counting line (0.0 - 1.0) |
-| `LOW_CONF_MIN` | `0.20` | Lower bound for uncertainty sampling |
-| `LOW_CONF_MAX` | `0.38` | Upper bound for uncertainty sampling |
-| `TRACK_LOSS_MIN_FRAMES`| `5` | Minimum tracked frames before flagging sudden disappearance |
-| `SNAPSHOT_COOLDOWN_FRAMES` | `30` | Minimum frames between snapshots of the same object |
-| `BORDER_MARGIN_PIXELS` | `35` | Frame edge margin to exclude normal vehicle exits |
+# Export to a local ZIP archive instead (Offline mode)
+python push_to_cvat.py --export-zip-only reports/approved_dataset.zip
+```

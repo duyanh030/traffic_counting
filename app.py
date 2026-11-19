@@ -5,6 +5,11 @@ import streamlit as st
 from PIL import Image
 
 import config
+from cvat_integration import (
+    push_approved_to_cvat,
+    export_approved_to_zip,
+    get_approved_candidates,
+)
 
 st.set_page_config(
     page_title="Traffic Counting - Active Learning Studio",
@@ -123,7 +128,7 @@ def batch_update_status(candidates_list, new_status: str):
 
 def main():
     st.title("🚗 Traffic Counting — Active Learning Review Studio")
-    st.caption("Review suspicious candidates (track-loss & low-confidence) before exporting to CVAT.")
+    st.caption("Review suspicious candidates (track-loss & low-confidence) and push directly to CVAT.")
 
     runs_tree = load_runs_data()
 
@@ -217,14 +222,16 @@ def main():
     with f_col4:
         st.write(f"**Showing {len(filtered)} / {total_cand} candidates**")
         b_col1, b_col2 = st.columns(2)
-        if b_col1.button("✅ Approve Page", use_container_width=True, help="Approve all items on current page"):
-            pass  # Handled below after pagination slice is calculated
-        if b_col2.button("❌ Reject Page", use_container_width=True, help="Reject all items on current page"):
-            pass
+        if b_col1.button("✅ Approve All Filtered", use_container_width=True):
+            batch_update_status(filtered, "approved")
+            st.rerun()
+        if b_col2.button("❌ Reject All Filtered", use_container_width=True):
+            batch_update_status(filtered, "rejected")
+            st.rerun()
 
     # --- MAIN CONTENT TABS ---
-    tab_gallery, tab_inspector, tab_summary = st.tabs(
-        ["🖼️ Gallery View", "🔍 Detail Inspector", "📈 Run History & Reports"]
+    tab_gallery, tab_inspector, tab_cvat, tab_summary = st.tabs(
+        ["🖼️ Gallery View", "🔍 Detail Inspector", "🚀 Push to CVAT", "📈 Run History & Reports"]
     )
 
     # --- TAB 1: GALLERY VIEW (WITH PAGINATION) ---
@@ -232,7 +239,6 @@ def main():
         if not filtered:
             st.info("No candidates match the selected filters.")
         else:
-            # Pagination controls
             page_size = 24
             total_pages = max(1, math.ceil(len(filtered) / page_size))
 
@@ -282,7 +288,6 @@ def main():
                             img = Image.open(preview_path)
                             st.image(img, use_container_width=True)
                         else:
-                            # Fallback to image_file if preview is not found
                             raw_path = run_dir / item.get("image_file", "")
                             if raw_path.is_file():
                                 st.image(Image.open(raw_path), use_container_width=True)
@@ -309,7 +314,7 @@ def main():
         else:
             cand_names = [
                 f"Frame {c.get('frame_idx')} - {c.get('candidate_id')} ({c.get('status')})"
-                for c in filtered[:200]  # Limit to 200 items in selectbox for responsiveness
+                for c in filtered[:200]
             ]
             selected_idx = st.selectbox(
                 "Select Candidate to Inspect",
@@ -347,7 +352,81 @@ def main():
                 update_candidate_status(inspect_item["_meta_path"], "rejected")
                 st.rerun()
 
-    # --- TAB 3: RUN HISTORY & SUMMARY ---
+    # --- TAB 3: PUSH TO CVAT ---
+    with tab_cvat:
+        st.subheader("🚀 Export Approved Candidates to CVAT")
+        st.write(
+            "Push all approved high-value frames to CVAT for labeling, or export them to a local zip package."
+        )
+
+        appr_list = get_approved_candidates(run_dir)
+        num_approved = len(appr_list)
+
+        if num_approved == 0:
+            st.warning(
+                "⚠️ There are **0 candidates marked as 'approved'** in this session yet.\n\n"
+                "Please go to **Gallery View**, select the best error frames and click **✅ Approve** before pushing to CVAT!"
+            )
+        else:
+            st.success(f"🎯 **{num_approved} approved candidates** are ready to be pushed to CVAT!")
+
+        st.markdown("---")
+        cvat_c1, cvat_c2 = st.columns(2)
+
+        with cvat_c1:
+            st.markdown("#### 🌐 CVAT Connection Settings")
+            input_cvat_url = st.text_input("CVAT Server URL", value=config.CVAT_URL)
+            input_cvat_user = st.text_input("CVAT Username", value=config.CVAT_USERNAME)
+            input_cvat_pass = st.text_input("CVAT Password", value=config.CVAT_PASSWORD, type="password")
+            input_task_name = st.text_input(
+                "Task Name",
+                value=f"Traffic_ActiveLearning_{selected_run_name}",
+            )
+            enable_pre_annotate = st.checkbox(
+                "🤖 Auto Pre-annotate with current YOLO (Auto-draws obvious vehicles to save ~85% time)",
+                value=True,
+            )
+
+            if st.button("🚀 Push to CVAT Now", disabled=(num_approved == 0), type="primary", use_container_width=True):
+                with st.spinner(f"Connecting to CVAT, uploading {num_approved} images and generating pre-annotations..."):
+                    try:
+                        res = push_approved_to_cvat(
+                            run_dir=run_dir,
+                            task_name=input_task_name,
+                            cvat_url=input_cvat_url,
+                            username=input_cvat_user,
+                            password=input_cvat_pass,
+                            enable_pre_annotation=enable_pre_annotate,
+                        )
+                        if res.get("success"):
+                            st.balloons()
+                            boxes_info = f" with **{res.get('pre_annotated_boxes', 0)} boxes pre-drawn by AI!**" if enable_pre_annotate else ""
+                            st.success(
+                                f"🎉 **Task Created Successfully!** Task ID: `#{res['task_id']}` ({res['count']} images{boxes_info})"
+                            )
+                            st.markdown(
+                                f"### 👉 [Open Task #{res['task_id']} on CVAT]({res['task_url']})"
+                            )
+                        else:
+                            st.error(f"Failed: {res.get('error')}")
+                    except Exception as e:
+                        st.error(f"❌ Error connecting to CVAT: {e}")
+
+        with cvat_c2:
+            st.markdown("#### 📦 Offline Export (ZIP)")
+            st.write(
+                "If CVAT is offline or hosted on a different machine, export all approved raw images into a clean zip archive for manual upload."
+            )
+            export_zip_path = config.BASE_DIR / "reports" / f"export_{selected_run_name}.zip"
+
+            if st.button("📦 Export to Local ZIP Archive", disabled=(num_approved == 0), use_container_width=True):
+                try:
+                    count, zip_p = export_approved_to_zip(run_dir, export_zip_path)
+                    st.success(f"✅ Exported {count} approved images to:\n`{zip_p}`")
+                except Exception as e:
+                    st.error(f"Export failed: {e}")
+
+    # --- TAB 4: RUN HISTORY & SUMMARY ---
     with tab_summary:
         st.subheader("📜 Global Execution History")
         history_file = config.REPORTS_DIR / "runs_history.json"

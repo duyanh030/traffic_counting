@@ -63,3 +63,8 @@ LOW_CONF_MAX = float(os.getenv("LOW_CONF_MAX", "0.38"))
 TRACK_LOSS_MIN_FRAMES = int(os.getenv("TRACK_LOSS_MIN_FRAMES", "5"))
 SNAPSHOT_COOLDOWN_FRAMES = int(os.getenv("SNAPSHOT_COOLDOWN_FRAMES", "30"))
 BORDER_MARGIN_PIXELS = int(os.getenv("BORDER_MARGIN_PIXELS", "35"))
+
+# CVAT Annotation Server Configuration
+CVAT_URL = os.getenv("CVAT_URL", "http://localhost:8080").rstrip("/")
+CVAT_USERNAME = os.getenv("CVAT_USERNAME", "")
+CVAT_PASSWORD = os.getenv("CVAT_PASSWORD", "")
