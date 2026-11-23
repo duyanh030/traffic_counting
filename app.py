@@ -7,6 +7,7 @@ from PIL import Image
 import config
 from ultralytics import YOLO
 from view_heatmap import generate_heatmap_for_image
+from track_loss_diagnoser import diagnose_candidate_frame
 from cvat_integration import (
     push_approved_to_cvat,
     export_approved_to_zip,
@@ -348,6 +349,42 @@ def main():
                     st.image(Image.open(prev_path), use_container_width=True)
                 else:
                     st.error("Preview image not found.")
+
+            # --- SMART ROOT CAUSE DIAGNOSTIC ASSISTANT ---
+            st.markdown("---")
+            st.subheader("🩺 AI Smart Diagnostic Assistant (Bắt bệnh & Khuyên Approve/Reject)")
+            diag_img_path = raw_path if raw_path.is_file() else prev_path
+            if diag_img_path.is_file():
+                try:
+                    cached_model = get_cached_yolo(config.MODEL_NAME)
+                    diag = diagnose_candidate_frame(
+                        frame_input=str(diag_img_path),
+                        details=inspect_item.get("details", {}),
+                        model=cached_model,
+                        conf_threshold=config.CONFIDENCE_THRESHOLD,
+                    )
+
+                    rec = diag.get("recommendation", "REVIEW")
+                    verdict = diag.get("verdict", "UNKNOWN")
+
+                    if rec == "APPROVE":
+                        st.success(
+                            f"### 🟢 KHUYÊN BẤM APPROVE: {diag.get('title')}\n\n"
+                            f"**Phân tích:** {diag.get('explanation')}\n\n"
+                            f"👉 **Đề xuất:** Hãy bấm **✅ Mark as Approved** bên dưới để đẩy vào CVAT gán nhãn cho đợt train tới!"
+                        )
+                    elif rec == "REJECT":
+                        icon = "🟠" if verdict == "ID_SWITCH" else "⚪"
+                        alert_fn = st.warning if verdict == "ID_SWITCH" else st.info
+                        alert_fn(
+                            f"### {icon} KHUYÊN BẤM REJECT: {diag.get('title')}\n\n"
+                            f"**Phân tích:** {diag.get('explanation')}\n\n"
+                            f"👉 **Đề xuất:** Hãy bấm **❌ Mark as Rejected** để bỏ qua, không tốn thời gian gán nhãn vô ích."
+                        )
+                    else:
+                        st.info(f"ℹ️ **Thông tin:** {diag.get('explanation')}")
+                except Exception as e:
+                    st.warning(f"Không thể chạy chẩn đoán tự động: {e}")
 
             st.markdown("### Metadata Details")
             st.json(inspect_item)
