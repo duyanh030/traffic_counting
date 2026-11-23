@@ -28,6 +28,12 @@ def parse_arguments():
         help="Input source: file path to an MP4 video or RTSP URL (default: config.RTSP_URL)",
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default=config.MODEL_NAME,
+        help=f"Path or name of YOLO model weights (default: {config.MODEL_NAME})",
+    )
+    parser.add_argument(
         "--save-candidates",
         action="store_true",
         default=True,
@@ -63,8 +69,9 @@ def main():
     start_timestamp = time.strftime("%Y%m%d_%H%M%S")
     start_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Clean model identifier (e.g. "yolov8n" from "yolov8n.pt")
-    model_identifier = Path(config.MODEL_NAME).stem
+    # Clean model identifier (e.g. "yolov8_traffic_latest" or "yolov8n")
+    model_name = args.model
+    model_identifier = Path(model_name).stem
 
     # Clean source identifier (e.g. "traffic_video" from "traffic_video.mp4" or "rtsp_camera")
     source_name = Path(source).stem if is_video_file else "rtsp_camera"
@@ -95,9 +102,9 @@ def main():
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if is_video_file else 0
 
     print(f"Resolution: {width}x{height} | Total video frames: {total_video_frames or 'Live Stream'}")
-    print(f"Initializing YOLO model: {config.MODEL_NAME} (version/id: {model_identifier})")
+    print(f"Initializing YOLO model: {model_name} (version/id: {model_identifier})")
     print(f"Candidate output folder: {run_candidates_dir}")
-    model = YOLO(config.MODEL_NAME)
+    model = YOLO(model_name)
 
     # Initialize CandidateDetector with the session-specific folder
     candidate_detector = None
@@ -205,7 +212,7 @@ def main():
         saved_report = candidate_detector.save_run_report(
             source=source,
             source_name=source_name,
-            model_name=config.MODEL_NAME,
+            model_name=model_name,
             start_time_str=start_time_str,
             end_time_str=end_time_str,
             duration_seconds=duration_seconds,
@@ -221,7 +228,7 @@ def main():
     print(f" • Run Session ID       : {run_id}")
     print(f" • Video Source Name    : {source_name}")
     print(f" • Video Source Path    : {mask_url(source) if not is_video_file else source}")
-    print(f" • Model Version / Name : {config.MODEL_NAME}")
+    print(f" • Model Version / Name : {model_name}")
     print(f" • Start Time           : {start_time_str}")
     print(f" • End Time             : {end_time_str}")
     print(f" • Duration             : {duration_seconds:.2f} seconds (~{duration_seconds/60:.1f} mins) | Avg FPS: {avg_fps}")

@@ -9,6 +9,7 @@ from ultralytics import YOLO
 
 import config
 from dataset_manager import DatasetManager
+from model_deployer import stage_model, approve_and_deploy_model
 
 
 def parse_arguments():
@@ -55,6 +56,12 @@ def parse_arguments():
         "--force-deploy",
         action="store_true",
         help="Force promote the new model even if it falls below the Quality Gate threshold",
+    )
+    parser.add_argument(
+        "--auto-deploy",
+        action="store_true",
+        default=False,
+        help="Automatically promote model to production without waiting for UI approval",
     )
     return parser.parse_args()
 
@@ -235,34 +242,34 @@ def main():
     gate_passed = (map50 >= args.min_map50) or args.force_deploy
 
     if gate_passed:
-        next_ver = get_next_version(version_json_path)
-        new_model_filename = f"yolov8_traffic_{next_ver}.pt"
-        promoted_path = models_dir / new_model_filename
-        latest_pointer = models_dir / "yolov8_traffic_latest.pt"
-
-        # 1. Save timestamped version
-        shutil.copy2(best_weights_path, promoted_path)
-        # 2. Update 'latest' pointer for zero-downtime hot reload
-        shutil.copy2(best_weights_path, latest_pointer)
-
-        # 3. Update version registry
-        update_version_registry(
-            version_json_path=version_json_path,
-            new_version=next_ver,
-            model_filename=new_model_filename,
+        staged_dir = stage_model(
+            best_weights_path=best_weights_path,
             metrics=metrics_dict,
             samples_count=stats["total"],
+            base_model=base_model_path,
+            epochs=args.epochs,
         )
 
-        print("\n" + "=" * 70)
-        print("🎉 QUALITY GATE PASSED — MODEL PROMOTED TO PRODUCTION!")
-        print("=" * 70)
-        print(f" • New Active Version  : {next_ver}")
-        print(f" • Model Artifact      : {promoted_path}")
-        print(f" • Production Pointer  : {latest_pointer}")
-        print(f" • Quality Score       : mAP@0.5 = {map50:.4f} (>= {args.min_map50:.2f})")
-        print("\n🚀 The counting system will now automatically run with this improved model!")
-        print("=" * 70 + "\n")
+        if args.auto_deploy:
+            res = approve_and_deploy_model(str(staged_dir))
+            print("\n" + "=" * 70)
+            print("🎉 QUALITY GATE PASSED — MODEL AUTO-PROMOTED TO PRODUCTION!")
+            print("=" * 70)
+            print(f" • New Active Version  : {res['version']}")
+            print(f" • Model Artifact      : {res['model_path']}")
+            print(f" • Quality Score       : mAP@0.5 = {map50:.4f} (>= {args.min_map50:.2f})")
+            print("=" * 70 + "\n")
+        else:
+            print("\n" + "=" * 70)
+            print("📦 QUALITY GATE PASSED — MODEL CANDIDATE STAGED AWAITING APPROVAL")
+            print("=" * 70)
+            print(f" • Staged Candidate ID : {staged_dir.name}")
+            print(f" • Staged Path         : {staged_dir}")
+            print(f" • Quality Score       : mAP@0.5 = {map50:.4f} (>= {args.min_map50:.2f})")
+            print(f" • Precision           : {precision:.4f} | Recall: {recall:.4f}")
+            print("\n👉 ACTION REQUIRED: Open Streamlit Review Studio (Tab '🎯 Model Deployment')")
+            print("   to inspect evaluation metrics and APPROVE promotion to production!")
+            print("=" * 70 + "\n")
     else:
         print("\n" + "=" * 70)
         print("⚠️ QUALITY GATE FAILED — DEPLOYMENT REJECTED")

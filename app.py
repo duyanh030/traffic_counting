@@ -8,6 +8,12 @@ import config
 from ultralytics import YOLO
 from view_heatmap import generate_heatmap_for_image
 from track_loss_diagnoser import diagnose_candidate_frame
+from model_deployer import (
+    get_active_model_info,
+    list_staged_models,
+    approve_and_deploy_model,
+    reject_staged_model,
+)
 from cvat_integration import (
     push_approved_to_cvat,
     export_approved_to_zip,
@@ -231,16 +237,16 @@ def main():
     with f_col4:
         st.write(f"**Showing {len(filtered)} / {total_cand} candidates**")
         b_col1, b_col2 = st.columns(2)
-        if b_col1.button("✅ Approve All Filtered", use_container_width=True):
+        if b_col1.button("✅ Approve All Filtered", width="stretch"):
             batch_update_status(filtered, "approved")
             st.rerun()
-        if b_col2.button("❌ Reject All Filtered", use_container_width=True):
+        if b_col2.button("❌ Reject All Filtered", width="stretch"):
             batch_update_status(filtered, "rejected")
             st.rerun()
 
     # --- MAIN CONTENT TABS ---
-    tab_gallery, tab_inspector, tab_cvat, tab_summary = st.tabs(
-        ["🖼️ Gallery View", "🔍 Detail Inspector", "🚀 Push to CVAT", "📈 Run History & Reports"]
+    tab_gallery, tab_inspector, tab_cvat, tab_deploy, tab_summary = st.tabs(
+        ["🖼️ Gallery View", "🔍 Detail Inspector", "🚀 Push to CVAT", "🎯 Model Deployment", "📈 Run History & Reports"]
     )
 
     # --- TAB 1: GALLERY VIEW (WITH PAGINATION) ---
@@ -295,11 +301,11 @@ def main():
                         preview_path = run_dir / item.get("preview_file", "")
                         if preview_path.is_file():
                             img = Image.open(preview_path)
-                            st.image(img, use_container_width=True)
+                            st.image(img, width="stretch")
                         else:
                             raw_path = run_dir / item.get("image_file", "")
                             if raw_path.is_file():
-                                st.image(Image.open(raw_path), use_container_width=True)
+                                st.image(Image.open(raw_path), width="stretch")
                             else:
                                 st.warning("Image file not found.")
 
@@ -307,10 +313,10 @@ def main():
 
                         # Action buttons
                         btn_c1, btn_c2 = st.columns(2)
-                        if btn_c1.button("✅ Approve", key=f"app_{cand_id}", use_container_width=True):
+                        if btn_c1.button("✅ Approve", key=f"app_{cand_id}", width="stretch"):
                             update_candidate_status(item["_meta_path"], "approved")
                             st.rerun()
-                        if btn_c2.button("❌ Reject", key=f"rej_{cand_id}", use_container_width=True):
+                        if btn_c2.button("❌ Reject", key=f"rej_{cand_id}", width="stretch"):
                             update_candidate_status(item["_meta_path"], "rejected")
                             st.rerun()
 
@@ -339,14 +345,14 @@ def main():
             with insp_col1:
                 st.subheader("Raw Frame (For CVAT Annotation)")
                 if raw_path.is_file():
-                    st.image(Image.open(raw_path), use_container_width=True)
+                    st.image(Image.open(raw_path), width="stretch")
                 else:
                     st.error("Raw image not found.")
 
             with insp_col2:
                 st.subheader("Preview Frame (AI Alert Highlight)")
                 if prev_path.is_file():
-                    st.image(Image.open(prev_path), use_container_width=True)
+                    st.image(Image.open(prev_path), width="stretch")
                 else:
                     st.error("Preview image not found.")
 
@@ -418,7 +424,7 @@ def main():
                 gen_hm_btn = st.button(
                     "⚡ Generate Heatmap",
                     key=f"btn_hm_{inspect_item.get('candidate_id', 'curr')}",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             if gen_hm_btn:
@@ -438,7 +444,7 @@ def main():
                             st.image(
                                 comparison_rgb,
                                 caption=f"Detection Box (Left) vs. Eigen-CAM Heatmap (Right) — Layer {selected_hm_layer}: {l_name}",
-                                use_container_width=True,
+                                width="stretch",
                             )
                             st.info(
                                 "💡 **Diagnostic Quick Guide:**\n"
@@ -493,7 +499,7 @@ def main():
                 value=True,
             )
 
-            if st.button("🚀 Push to CVAT Now", disabled=(num_approved == 0), type="primary", use_container_width=True):
+            if st.button("🚀 Push to CVAT Now", disabled=(num_approved == 0), type="primary", width="stretch"):
                 with st.spinner(f"Connecting to CVAT, uploading {num_approved} images and generating pre-annotations..."):
                     try:
                         res = push_approved_to_cvat(
@@ -525,14 +531,133 @@ def main():
             )
             export_zip_path = config.BASE_DIR / "reports" / f"export_{selected_run_name}.zip"
 
-            if st.button("📦 Export to Local ZIP Archive", disabled=(num_approved == 0), use_container_width=True):
+            if st.button("📦 Export to Local ZIP Archive", disabled=(num_approved == 0), width="stretch"):
                 try:
                     count, zip_p = export_approved_to_zip(run_dir, export_zip_path)
                     st.success(f"✅ Exported {count} approved images to:\n`{zip_p}`")
                 except Exception as e:
                     st.error(f"Export failed: {e}")
 
-    # --- TAB 4: RUN HISTORY & SUMMARY ---
+    # --- TAB 4: MODEL DEPLOYMENT & GOVERNANCE GATE ---
+    with tab_deploy:
+        st.subheader("🎯 Model Deployment & Governance Gate")
+        st.caption(
+            "Review newly retrained candidate models, evaluate validation metrics against the active production baseline, and approve promotion to production."
+        )
+
+        # 1. Active Production Model Baseline
+        active_info = get_active_model_info()
+        active_ver = active_info.get("active_version", "v1.0.0")
+        active_model_file = active_info.get("model_path", config.MODEL_NAME)
+        active_metrics = active_info.get("history", [{}])[-1].get("metrics", {}) if active_info.get("history") else {}
+        active_map50 = active_metrics.get("mAP50", 0.65)
+
+        st.markdown("#### 🏆 Active Production Model")
+        b_c1, b_c2, b_c3, b_c4 = st.columns(4)
+        b_c1.metric("Active Version", active_ver)
+        b_c2.metric("Base Model Artifact", Path(active_model_file).name)
+        b_c3.metric(
+            "Baseline mAP@0.5",
+            f"{active_map50:.4f}" if isinstance(active_map50, (int, float)) else str(active_map50),
+        )
+        b_c4.metric(
+            "Last Deployed",
+            active_info.get("history", [{}])[-1].get("deployed_at", "Initial") if active_info.get("history") else "Initial",
+        )
+
+        st.markdown("---")
+
+        # 2. Staged Candidate Models Awaiting Approval
+        st.markdown("#### ⏳ Staged Model Candidates Awaiting Your Approval")
+        staged_models = list_staged_models()
+
+        if not staged_models:
+            st.info(
+                "✅ **No candidate models currently awaiting approval.**\n\nWhen you run `python retrain.py --epochs 30`, trained candidate models will appear here for your review and deployment."
+            )
+        else:
+            for cand in staged_models:
+                c_id = cand.get("candidate_id")
+                c_metrics = cand.get("metrics", {})
+                cand_map50 = c_metrics.get("mAP50", 0.0)
+                cand_p = c_metrics.get("precision", 0.0)
+                cand_r = c_metrics.get("recall", 0.0)
+                cand_samples = cand.get("training_samples", 0)
+                cand_epochs = cand.get("epochs", 30)
+                cand_folder = cand.get("_folder_path")
+
+                delta_map = cand_map50 - active_map50 if isinstance(active_map50, (int, float)) else None
+
+                with st.container():
+                    st.markdown(f"### 📦 Candidate: `{c_id}` *(Trained: {cand.get('trained_at')})*")
+
+                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                    m_col1.metric(
+                        "Validation mAP@0.5",
+                        f"{cand_map50:.4f}",
+                        delta=f"{delta_map:+.4f}" if delta_map is not None else None,
+                    )
+                    m_col2.metric("Precision", f"{cand_p:.4f}")
+                    m_col3.metric("Recall", f"{cand_r:.4f}")
+                    m_col4.metric("Training Samples", f"{cand_samples} ({cand_epochs} epochs)")
+
+                    btn_col1, btn_col2, _ = st.columns([2, 2, 4])
+                    with btn_col1:
+                        if st.button(
+                            "🚀 Approve & Promote to Production",
+                            key=f"appr_model_{c_id}",
+                            type="primary",
+                            width="stretch",
+                        ):
+                            try:
+                                res = approve_and_deploy_model(cand_folder)
+                                st.balloons()
+                                st.success(f"🎉 **Model Successfully Promoted to Production!** Version: `{res['version']}`")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error deploying model: {e}")
+
+                    with btn_col2:
+                        if st.button(
+                            "🗑️ Reject & Discard",
+                            key=f"rej_model_{c_id}",
+                            width="stretch",
+                        ):
+                            try:
+                                reject_staged_model(cand_folder)
+                                st.warning(f"Candidate `{c_id}` discarded.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error discarding candidate: {e}")
+
+                    st.markdown("---")
+
+        # 3. Model Version History Table
+        st.markdown("#### 📜 Semantic Version Deployment History")
+        history = active_info.get("history", [])
+        if history:
+            hist_rows = []
+            for h in reversed(history):
+                m = h.get("metrics", {})
+                map50_val = m.get("mAP50")
+                prec_val = m.get("precision")
+                rec_val = m.get("recall")
+
+                hist_rows.append(
+                    {
+                        "Version": str(h.get("version", "")),
+                        "Model File": str(h.get("model_file", "")),
+                        "Deployed At": str(h.get("deployed_at", "")),
+                        "Training Samples": str(h.get("training_samples", "-")),
+                        "mAP@0.5": f"{map50_val:.4f}" if isinstance(map50_val, (int, float)) else "-",
+                        "Precision": f"{prec_val:.4f}" if isinstance(prec_val, (int, float)) else "-",
+                        "Recall": f"{rec_val:.4f}" if isinstance(rec_val, (int, float)) else "-",
+                        "Status": "ACTIVE" if h.get("version") == active_ver else "ARCHIVED",
+                    }
+                )
+            st.dataframe(hist_rows, width="stretch")
+
+    # --- TAB 5: RUN HISTORY & SUMMARY ---
     with tab_summary:
         st.subheader("📜 Global Execution History")
         history_file = config.REPORTS_DIR / "runs_history.json"
@@ -558,7 +683,7 @@ def main():
                                 "Candidates": snaps.get("total_captured", 0),
                             }
                         )
-                    st.dataframe(table_rows, use_container_width=True)
+                    st.dataframe(table_rows, width="stretch")
                 else:
                     st.info("History file is empty.")
             except Exception as e:
