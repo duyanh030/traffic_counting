@@ -55,6 +55,22 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
   - Filter by review status (Pending / Approved / Rejected), detection reason, and vehicle class.
   - Single-click or batch approval/rejection to prepare datasets for CVAT annotation.
   - Side-by-side inspection of pristine raw frames vs. AI-highlighted preview frames.
+- **Automated Root-Cause Diagnostic Assistant (`track_loss_diagnoser.py`):**
+  - Instant geometric & confidence analysis to classify candidate errors:
+    - **⭐ Partial Occlusion (Hard Positive):** Highlights vehicles partially obscured by large vehicles (Feature Occlusion) where humans can still see the vehicle $\rightarrow$ **Recommended: APPROVE**.
+    - **Confidence Dipped / Severe Drop:** Uncovers false negatives where YOLO missed the vehicle $\rightarrow$ **Recommended: APPROVE**.
+    - **Full Occlusion:** Detects vehicles completely hidden ($>80\%$) behind trucks/buses $\rightarrow$ **Recommended: REJECT** (avoids detector hallucination; handled by tracker buffer).
+    - **Tracker ID Switch:** Distinguishes tracker discontinuities from detector failures $\rightarrow$ **Recommended: REJECT** (saves ~70% wasted annotation effort).
+    - **Natural Exit:** Filters out expected tracking termination at camera frame boundaries $\rightarrow$ **Recommended: REJECT**.
+- **Explainable AI (XAI) & Attention Heatmaps (`view_heatmap.py` & `view_channels.py`):**
+  - **On-Demand Eigen-CAM Heatmaps:** Seamlessly integrated into Streamlit Tab 2 to visualize neural network feature activations (<50ms inference via cached model).
+  - **Multi-Scale Layer Inspection:** Target specific network stages:
+    - `Layer 15 (P3)`: Optimized for motorcycles, bicycles, and distant small objects.
+    - `Layer 18 (P4)`: Optimized for medium-scale sedans and SUVs.
+    - `Layer 21 (P5)`: Optimized for large trucks, buses, and containers.
+    - `Layer 9 (SPPF)`: Explains macro environmental context and heavy shadow gradients.
+  - **Diagnostic Identification:** Instantly differentiates **Feature Occlusion** (target features absorbed by larger neighbor) from **Texture Blending** (target blended into asphalt road background).
+  - **Feature Channel Dissector:** Unpacks all sub-channel filters (e.g., 64 channels in Layer 15) into an interactive grid layout to view individual visual concepts (wheels, windshields, helmets).
 - **1-Click CVAT Integration (`cvat_integration.py` & `push_to_cvat.py`):**
   - Directly authenticates with self-hosted CVAT (`http://localhost:8080`) via REST API v2.
   - Automatically creates tasks with vehicle label categories (`car`, `motorcycle`, `bus`, `truck`).
@@ -72,14 +88,18 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
 
 ```text
 traffic_counting/
-├── config.py             # Centralized project configuration module
-├── candidate_detector.py # Active Learning: track-loss & uncertainty snapshot engine
-├── count_traffic.py      # Main vehicle tracking, counting, and candidate capture
-├── app.py                # Streamlit Web Studio for candidate review and CVAT push
-├── cvat_integration.py   # CVAT REST API client & task upload pipeline
-├── push_to_cvat.py       # Standalone CLI script to push approved candidates to CVAT
-├── dataset_manager.py    # CVAT export zip ingestion & train/val split manager
-├── retrain.py            # Step 4: Fine-tuning, Data Augmentation & Quality Gate
+├── config.py                 # Centralized project configuration module
+├── candidate_detector.py     # Active Learning: track-loss & uncertainty snapshot engine
+├── count_traffic.py          # Main vehicle tracking, counting, and candidate capture
+├── app.py                    # Streamlit Web Studio for candidate review and CVAT push
+├── track_loss_diagnoser.py   # Root-cause diagnostic engine (Partial vs Full Occlusion, ID Switch)
+├── diagnose_candidate.py     # Standalone CLI tool to diagnose candidate JSON snapshots
+├── view_heatmap.py           # Multi-layer Eigen-CAM attention heatmap generator
+├── view_channels.py          # Sub-channel feature filter grid inspector (e.g. 64 channels)
+├── cvat_integration.py       # CVAT REST API client & task upload pipeline
+├── push_to_cvat.py           # Standalone CLI script to push approved candidates to CVAT
+├── dataset_manager.py        # CVAT export zip ingestion & train/val split manager
+├── retrain.py                # Step 4: Fine-tuning, Data Augmentation & Quality Gate
 ├── models/               # Model registry & version tracking
 │   ├── version.json      # Semantic version history and validation metrics
 │   └── yolov8_traffic_latest.pt # Active production model pointer
@@ -106,13 +126,29 @@ traffic_counting/
 python count_traffic.py --source sample_video/EU.mp4
 ```
 
-### Step 2: Review & Triage in Streamlit Web Studio
+### Step 2: Review, Diagnose & Triage in Streamlit Web Studio
 ```bash
 streamlit run app.py
 ```
 - Open `http://localhost:8501`.
-- Inspect candidates in **Gallery View** or **Detail Inspector**.
-- Click **✅ Approve** on genuine errors (occluded vehicles, ambiguous classes, missed detections).
+- Switch to **Detail Inspector** to view candidate frames:
+  - **🩺 AI Smart Diagnostic Assistant:** Automatically detects the root cause of the alert (`Partial Occlusion`, `Detection Drop`, `Full Occlusion`, `ID Switch`) and displays a clear `🟢 APPROVE` or `⚪ REJECT` recommendation.
+  - **🔥 On-Demand Attention Heatmap:** Click **⚡ Generate Heatmap** on Layer 15 (Motorcycles), Layer 18 (Cars), or Layer 21 (Trucks) to inspect where the neural network placed its focus.
+- Click **✅ Approve** on genuine errors (partially occluded vehicles, missed detections).
+- Click **❌ Reject** on false alarms (tracker ID swaps, complete occlusions).
+
+#### Optional: Terminal CLI Diagnostics & Heatmap Generation
+You can also run deep diagnostics and feature inspections directly from the command line:
+```bash
+# 1. Run root-cause diagnosis on any candidate JSON
+python diagnose_candidate.py candidates/metadata/cand_20261119_100035_f005651_track_loss.json
+
+# 2. Generate Eigen-CAM heatmaps across multiple YOLO layers simultaneously
+python view_heatmap.py candidates/images/sample.jpg -l 9 15 18 21
+
+# 3. Dissect and visualize all 64 sub-channel feature filters of Layer 15 in a grid
+python view_channels.py candidates/images/sample.jpg -l 15 --cmap jet
+```
 
 ### Step 3: Push Approved Candidates to CVAT
 - On Streamlit, switch to the **"🚀 Push to CVAT"** tab.
