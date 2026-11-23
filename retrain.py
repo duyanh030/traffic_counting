@@ -133,11 +133,11 @@ def main():
         print(f"\n📥 Ingesting new dataset from: {zip_path}")
         dm.extract_and_ingest_zip(zip_path, val_ratio=0.2)
     else:
-        # Check if any zip exists in dataset/imports/
-        import_zips = list(dm.imports_dir.glob("*.zip"))
-        if import_zips:
-            latest_zip = max(import_zips, key=lambda p: p.stat().st_mtime)
-            print(f"\n📥 Auto-detected new dataset in imports: {latest_zip.name}")
+        # Check cvat_exports/ or dataset/imports/ for new zip files
+        candidate_zips = list(config.CVAT_EXPORTS_DIR.glob("*.zip")) + list(dm.imports_dir.glob("*.zip"))
+        if candidate_zips:
+            latest_zip = max(candidate_zips, key=lambda p: p.stat().st_mtime)
+            print(f"\n📥 Auto-detected new dataset export: {latest_zip.name} (from {latest_zip.parent.name}/)")
             dm.extract_and_ingest_zip(latest_zip, val_ratio=0.2)
 
     stats = dm.get_stats()

@@ -2,11 +2,85 @@ import os
 import random
 import shutil
 import zipfile
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import yaml
 
 import config
+
+
+def get_scenario_tag(img_path: Path, label_path: Optional[Path]) -> str:
+    """
+    Determine scenario/use-case tag for stratified sampling.
+    Derives from candidate filename (track_loss, low_confidence)
+    or from annotated YOLO classes inside the .txt label.
+    """
+    name_lower = img_path.name.lower()
+    if "track_loss" in name_lower:
+        return "track_loss"
+    elif "low_confidence" in name_lower or "low_conf" in name_lower:
+        return "low_confidence"
+
+    if label_path and label_path.is_file():
+        try:
+            with open(label_path, "r", encoding="utf-8") as f:
+                classes = {line.strip().split()[0] for line in f if line.strip()}
+            if not classes:
+                return "empty_background"
+            if len(classes) == 1:
+                class_map = {"0": "car", "1": "motorcycle", "2": "bus", "3": "truck"}
+                return f"{class_map.get(list(classes)[0], 'class_' + list(classes)[0])}_dominant"
+            return "mixed_traffic"
+        except Exception:
+            pass
+
+    return "general_traffic"
+
+
+def stratified_split_by_scenario(
+    pairs: List[Tuple[Path, Optional[Path]]],
+    val_ratio: float = 0.2,
+) -> Tuple[List[Tuple[Path, Optional[Path]]], List[Tuple[Path, Optional[Path]]]]:
+    """
+    Perform stratified sampling to ensure all scenarios/classes
+    are proportionally represented across both train and validation splits.
+    """
+    total = len(pairs)
+    if total <= 3:
+        # Insufficient samples to split; retain all in training
+        return pairs, []
+
+    # Group by scenario
+    scenario_buckets = defaultdict(list)
+    for img, lbl in pairs:
+        tag = get_scenario_tag(img, lbl)
+        scenario_buckets[tag].append((img, lbl))
+
+    final_train = []
+    final_val = []
+
+    random.seed(42)
+    print(f"\n📊 Stratified Dataset Splitting ({len(scenario_buckets)} scenarios):")
+    for scenario, items in sorted(scenario_buckets.items()):
+        random.shuffle(items)
+        n_items = len(items)
+
+        if n_items > 3:
+            val_count = max(1, int(round(n_items * val_ratio)))
+        elif n_items >= 2 and total > 5:
+            val_count = 1
+        else:
+            val_count = 0
+
+        val_items = items[:val_count]
+        train_items = items[val_count:]
+
+        final_val.extend(val_items)
+        final_train.extend(train_items)
+        print(f"   • Scenario '{scenario}': {len(train_items)} train | {len(val_items)} val (total: {n_items})")
+
+    return final_train, final_val
 
 
 class DatasetManager:
@@ -72,12 +146,7 @@ class DatasetManager:
             raise ValueError(f"No valid image-label pairs found inside {zip_path.name}")
 
         print(f"🔍 Discovered {len(pairs)} labeled images inside the zip archive.")
-        random.seed(42)
-        random.shuffle(pairs)
-
-        val_count = max(1, int(len(pairs) * val_ratio)) if len(pairs) > 3 else 0
-        val_pairs = pairs[:val_count]
-        train_pairs = pairs[val_count:]
+        train_pairs, val_pairs = stratified_split_by_scenario(pairs, val_ratio=val_ratio)
 
         # Ingest train pairs
         for img, lbl in train_pairs:

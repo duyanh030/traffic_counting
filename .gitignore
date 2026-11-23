@@ -26,6 +26,8 @@ reports/
 # Datasets & Training logs
 dataset/
 runs/
+cvat_exports/*.zip
+
 
 # Video samples & data files
 sample_video/
