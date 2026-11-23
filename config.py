@@ -66,6 +66,14 @@ TRACK_LOSS_MIN_FRAMES = int(os.getenv("TRACK_LOSS_MIN_FRAMES", "5"))
 SNAPSHOT_COOLDOWN_FRAMES = int(os.getenv("SNAPSHOT_COOLDOWN_FRAMES", "30"))
 BORDER_MARGIN_PIXELS = int(os.getenv("BORDER_MARGIN_PIXELS", "35"))
 
+# Deduplication & Quality Filtering parameters
+MAX_CANDIDATES_PER_RUN = int(os.getenv("MAX_CANDIDATES_PER_RUN", "150"))
+GLOBAL_COOLDOWN_FRAMES = int(os.getenv("GLOBAL_COOLDOWN_FRAMES", "90"))
+MIN_BLUR_SCORE = float(os.getenv("MIN_BLUR_SCORE", "80.0"))
+MIN_BRIGHTNESS = float(os.getenv("MIN_BRIGHTNESS", "35.0"))
+MAX_BRIGHTNESS = float(os.getenv("MAX_BRIGHTNESS", "225.0"))
+HASH_SIMILARITY_MAX_DIFF = int(os.getenv("HASH_SIMILARITY_MAX_DIFF", "8"))
+
 # CVAT Annotation Server Configuration
 CVAT_URL = os.getenv("CVAT_URL", "http://localhost:8080").rstrip("/")
 CVAT_USERNAME = os.getenv("CVAT_USERNAME", "")

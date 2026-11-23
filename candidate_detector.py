@@ -4,7 +4,7 @@ import json
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 
 import config
@@ -13,8 +13,12 @@ import config
 class CandidateDetector:
     """
     Monitors object detections and tracking states to identify frames
-    with potential errors (false negatives, track loss, low confidence)
-    for human review and active learning.
+    with potential errors (false negatives, track loss, low confidence).
+    
+    Includes Production-Grade Filtering:
+    1. Visual Deduplication via Perceptual Hashing (dHash)
+    2. Image Quality Gates (Blur & Brightness verification)
+    3. Global Time-based Rate-Limiting & Run Quota
     """
 
     def __init__(
@@ -24,6 +28,12 @@ class CandidateDetector:
         track_loss_min_frames: int = config.TRACK_LOSS_MIN_FRAMES,
         cooldown_frames: int = config.SNAPSHOT_COOLDOWN_FRAMES,
         border_margin: int = config.BORDER_MARGIN_PIXELS,
+        max_candidates: int = config.MAX_CANDIDATES_PER_RUN,
+        global_cooldown: int = config.GLOBAL_COOLDOWN_FRAMES,
+        min_blur_score: float = config.MIN_BLUR_SCORE,
+        min_brightness: float = config.MIN_BRIGHTNESS,
+        max_brightness: float = config.MAX_BRIGHTNESS,
+        hash_max_diff: int = config.HASH_SIMILARITY_MAX_DIFF,
     ):
         self.candidates_dir = Path(run_candidates_dir or config.CANDIDATES_DIR)
         self.img_dir = self.candidates_dir / "images"
@@ -40,15 +50,82 @@ class CandidateDetector:
         self.cooldown_frames = cooldown_frames
         self.border_margin = border_margin
 
+        # Rate Limiting & Quotas
+        self.max_candidates = max_candidates
+        self.global_cooldown = global_cooldown
+        self.last_global_snapshot_frame: Dict[str, int] = {}
+
+        # Quality Gate Parameters (from check.md)
+        self.min_blur_score = min_blur_score
+        self.min_brightness = min_brightness
+        self.max_brightness = max_brightness
+
+        # Perceptual Hashing (dHash) for Visual Deduplication
+        self.hash_max_diff = hash_max_diff
+        self.captured_hashes: List[int] = []
+
         # Tracking state cache: tracker_id -> dict
         self.active_tracks: Dict[int, Dict[str, Any]] = {}
-        # Cooldown registry to avoid spamming snapshots for the same object
+        # Cooldown registry for individual tracker IDs
         self.cooldown_registry: Dict[str, int] = {}
-        self.total_candidates_saved = 0
 
-        # Detailed breakdown statistics for the final report
+        # Statistics & Metrics
+        self.total_candidates_saved = 0
         self.stats_by_reason: Counter = Counter()
         self.stats_by_class: Counter = Counter()
+
+        # Suppression counters
+        self.filtered_duplicates_count = 0
+        self.filtered_blurry_count = 0
+        self.filtered_brightness_count = 0
+        self.filtered_quota_reached = False
+
+    @staticmethod
+    def compute_dhash(crop: np.ndarray, hash_size: int = 8) -> int:
+        """
+        Compute 64-bit difference hash (dHash) on vehicle crop
+        for ultrafast visual similarity comparison.
+        """
+        if crop is None or crop.size == 0 or crop.shape[0] < 8 or crop.shape[1] < 8:
+            return 0
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+        resized = cv2.resize(gray, (hash_size + 1, hash_size), interpolation=cv2.INTER_AREA)
+        diff = resized[:, 1:] > resized[:, :-1]
+        return sum([2 ** i for i, v in enumerate(diff.flatten()) if v])
+
+    def is_visual_duplicate(self, crop: np.ndarray) -> bool:
+        """
+        Check if image crop is visually similar to any previously captured candidate.
+        Uses Hamming distance on 64-bit perceptual dHash.
+        """
+        new_hash = self.compute_dhash(crop)
+        if new_hash == 0:
+            return False
+
+        for existing_hash in self.captured_hashes:
+            # bit_count() calculates Hamming distance in O(1)
+            dist = (new_hash ^ existing_hash).bit_count()
+            if dist <= self.hash_max_diff:
+                return True
+        return False
+
+    def validate_quality(self, frame: np.ndarray) -> Tuple[bool, str]:
+        """
+        Quality Gate: Discard blurry or extreme brightness frames (Quality Gate from check.md).
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+
+        # 1. Blur test (Laplacian variance)
+        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        if blur_score < self.min_blur_score:
+            return False, "blurry"
+
+        # 2. Brightness test (Mean pixel intensity: 35-225)
+        brightness = float(np.mean(gray))
+        if not (self.min_brightness <= brightness <= self.max_brightness):
+            return False, "extreme_brightness"
+
+        return True, "ok"
 
     def is_near_border(self, bbox: np.ndarray, frame_shape: tuple) -> bool:
         """Check if bounding box [x1, y1, x2, y2] is near frame borders (natural exit)."""
@@ -61,8 +138,8 @@ class CandidateDetector:
             or y2 >= (height - self.border_margin)
         )
 
-    def should_capture(self, key: str, current_frame_idx: int) -> bool:
-        """Debounce capture events to avoid redundant consecutive snapshots."""
+    def should_capture_object(self, key: str, current_frame_idx: int) -> bool:
+        """Debounce capture events for the same specific object tracker."""
         last_frame = self.cooldown_registry.get(key, -999999)
         if current_frame_idx - last_frame >= self.cooldown_frames:
             self.cooldown_registry[key] = current_frame_idx
@@ -76,10 +153,50 @@ class CandidateDetector:
         reason: str,
         details: Dict[str, Any],
         highlight_bbox: Optional[np.ndarray] = None,
-    ) -> str:
+    ) -> Optional[str]:
         """
-        Save raw frame, annotated preview, and metadata JSON for a candidate.
+        Save raw frame, annotated preview, and metadata JSON after passing all filters.
         """
+        # Quota check
+        if self.total_candidates_saved >= self.max_candidates:
+            if not self.filtered_quota_reached:
+                print(f"🛑 [Quota Reached] Maximum {self.max_candidates} diverse candidates captured for this run.")
+                self.filtered_quota_reached = True
+            return None
+
+        # Global rate-limiting per reason
+        last_global = self.last_global_snapshot_frame.get(reason, -999999)
+        if frame_idx - last_global < self.global_cooldown:
+            return None
+
+        # Image Quality Gate check
+        quality_ok, quality_err = self.validate_quality(frame)
+        if not quality_ok:
+            if quality_err == "blurry":
+                self.filtered_blurry_count += 1
+            else:
+                self.filtered_brightness_count += 1
+            return None
+
+        # Visual Deduplication check (dHash on vehicle crop)
+        h, w = frame.shape[:2]
+        if highlight_bbox is not None:
+            x1, y1, x2, y2 = map(int, highlight_bbox)
+            crop = frame[max(0, y1) : min(h, y2), max(0, x1) : min(w, x2)]
+        else:
+            crop = frame
+
+        if self.is_visual_duplicate(crop):
+            self.filtered_duplicates_count += 1
+            return None
+
+        # Register hash and update global cooldown
+        new_hash = self.compute_dhash(crop)
+        if new_hash != 0:
+            self.captured_hashes.append(new_hash)
+        self.last_global_snapshot_frame[reason] = frame_idx
+
+        # Generate unique candidate file
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         candidate_id = f"cand_{timestamp}_f{frame_idx:06d}_{reason}"
 
@@ -87,10 +204,10 @@ class CandidateDetector:
         preview_path = self.preview_dir / f"{candidate_id}.jpg"
         meta_path = self.meta_dir / f"{candidate_id}.json"
 
-        # 1. Save clean original frame (suitable for CVAT annotation)
+        # 1. Save clean original frame (for CVAT annotation)
         cv2.imwrite(str(img_path), frame)
 
-        # 2. Save annotated preview for fast human inspection in the UI
+        # 2. Save annotated preview for UI review
         preview = frame.copy()
         if highlight_bbox is not None:
             x1, y1, x2, y2 = map(int, highlight_bbox)
@@ -108,7 +225,6 @@ class CandidateDetector:
                 cv2.LINE_AA,
             )
 
-        # Banner at the top
         banner_text = f"Candidate Alert: {reason.upper()} (Frame {frame_idx})"
         cv2.putText(
             preview,
@@ -132,7 +248,7 @@ class CandidateDetector:
             "image_file": f"images/{candidate_id}.jpg",
             "preview_file": f"previews/{candidate_id}.jpg",
             "reviewed": False,
-            "status": "pending",  # pending, approved, rejected
+            "status": "pending",
         }
 
         with open(meta_path, "w", encoding="utf-8") as f:
@@ -143,7 +259,9 @@ class CandidateDetector:
         class_name = details.get("class_name", "unknown")
         self.stats_by_class[class_name] += 1
 
-        print(f"⚠️ [Candidate Captured] ID: {candidate_id} | Reason: {reason} | Total: {self.total_candidates_saved}")
+        print(
+            f"✨ [Diverse Candidate Captured] #{self.total_candidates_saved} | ID: {candidate_id} | Class: {class_name} | Reason: {reason}"
+        )
         return candidate_id
 
     def process_frame(
@@ -154,10 +272,11 @@ class CandidateDetector:
         model_names: Dict[int, str],
     ):
         """
-        Analyze current frame detections & tracker states:
-        1. Flag low-confidence detections.
-        2. Detect track-loss (objects that suddenly vanish in the ROI).
+        Analyze current frame detections & tracker states with quality and duplicate filtering.
         """
+        if self.total_candidates_saved >= self.max_candidates:
+            return
+
         current_tracked_ids = set()
 
         if detections is not None and len(detections) > 0 and detections.tracker_id is not None:
@@ -186,10 +305,10 @@ class CandidateDetector:
                     self.active_tracks[tracker_id]["last_bbox"] = bbox
                     self.active_tracks[tracker_id]["confidence"] = float(conf)
 
-                # 1. CHECK LOW CONFIDENCE (Uncertainty sampling)
+                # 1. CHECK LOW CONFIDENCE (Uncertainty Sampling)
                 if self.low_conf_min <= conf <= self.low_conf_max:
                     cooldown_key = f"lowconf_id_{tracker_id}"
-                    if self.should_capture(cooldown_key, frame_idx):
+                    if self.should_capture_object(cooldown_key, frame_idx):
                         details = {
                             "tracker_id": int(tracker_id),
                             "class_name": class_name,
@@ -204,8 +323,7 @@ class CandidateDetector:
                             highlight_bbox=bbox,
                         )
 
-        # 2. CHECK TRACK LOSS (False Negative detection)
-        # Identify tracks that were active on the previous frame but are absent now
+        # 2. CHECK TRACK LOSS (False Negative Detection)
         missing_ids = [
             tid
             for tid, tinfo in self.active_tracks.items()
@@ -217,12 +335,10 @@ class CandidateDetector:
             frame_count = tinfo["frame_count"]
             last_bbox = tinfo["last_bbox"]
 
-            # Only consider objects that were tracked consistently for at least N frames
             if frame_count >= self.track_loss_min_frames:
-                # If the object was NOT near the border when it disappeared -> Sudden track loss!
                 if not self.is_near_border(last_bbox, frame.shape):
                     cooldown_key = f"trackloss_id_{tid}"
-                    if self.should_capture(cooldown_key, frame_idx):
+                    if self.should_capture_object(cooldown_key, frame_idx):
                         details = {
                             "tracker_id": int(tid),
                             "class_name": tinfo["class_name"],
@@ -238,7 +354,7 @@ class CandidateDetector:
                             highlight_bbox=last_bbox,
                         )
 
-        # Cleanup tracks that have been inactive for more than 30 frames
+        # Cleanup tracks inactive for > 30 frames
         expired_ids = [
             tid
             for tid, tinfo in self.active_tracks.items()
@@ -260,8 +376,7 @@ class CandidateDetector:
         vehicles_out: int,
     ) -> Dict[str, Any]:
         """
-        Generate and save a detailed run report for this specific execution session,
-        as well as appending to the global history log and CSV summary.
+        Generate and save a detailed run report including deduplication & quality metrics.
         """
         clean_source_path = source if not source.startswith("rtsp://") else "rtsp://[camera_stream]"
         fps_avg = round(total_frames / duration_seconds, 2) if duration_seconds > 0 else 0
@@ -286,6 +401,12 @@ class CandidateDetector:
                 "breakdown_by_reason": dict(self.stats_by_reason),
                 "breakdown_by_class": dict(self.stats_by_class),
             },
+            "filtering_intelligence": {
+                "duplicates_suppressed_by_dhash": self.filtered_duplicates_count,
+                "blurry_frames_rejected": self.filtered_blurry_count,
+                "extreme_brightness_rejected": self.filtered_brightness_count,
+                "max_quota_cap": self.max_candidates,
+            },
             "candidates_directory": str(self.candidates_dir),
         }
 
@@ -309,7 +430,7 @@ class CandidateDetector:
         with open(history_file, "w", encoding="utf-8") as f:
             json.dump(history, f, indent=2)
 
-        # 3. Update global CSV summary for easy spreadsheet analysis
+        # 3. Update global CSV summary
         csv_file = reports_dir / "runs_history.csv"
         file_exists = csv_file.is_file()
         with open(csv_file, "a", newline="", encoding="utf-8") as f:
@@ -326,6 +447,7 @@ class CandidateDetector:
                     "vehicles_in",
                     "vehicles_out",
                     "suspicious_snapshots",
+                    "duplicates_filtered",
                     "candidates_dir",
                 ])
             writer.writerow([
@@ -339,6 +461,7 @@ class CandidateDetector:
                 vehicles_in,
                 vehicles_out,
                 self.total_candidates_saved,
+                self.filtered_duplicates_count,
                 str(self.candidates_dir),
             ])
 

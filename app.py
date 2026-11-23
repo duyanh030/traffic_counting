@@ -5,6 +5,8 @@ import streamlit as st
 from PIL import Image
 
 import config
+from ultralytics import YOLO
+from view_heatmap import generate_heatmap_for_image
 from cvat_integration import (
     push_approved_to_cvat,
     export_approved_to_zip,
@@ -17,6 +19,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+@st.cache_resource
+def get_cached_yolo(model_name: str = "yolov8n.pt"):
+    """Cache YOLO model in memory so heatmap generation is instantaneous."""
+    return YOLO(model_name)
 
 
 def load_runs_data():
@@ -344,6 +352,67 @@ def main():
             st.markdown("### Metadata Details")
             st.json(inspect_item)
 
+            # --- ON-DEMAND AI ATTENTION HEATMAP (DEBUGGER) ---
+            st.markdown("---")
+            st.subheader("🔥 AI Attention Heatmap (Debug Feature Occlusion / Texture Blending)")
+            st.caption(
+                "Click to inspect where YOLO's neural network was focusing its attention on this suspicious candidate frame."
+            )
+
+            hm_col1, hm_col2 = st.columns([2, 1])
+            with hm_col1:
+                layer_options = {
+                    15: "Layer 15 (P3 - Recommended for Motorcycles & Small Vehicles)",
+                    18: "Layer 18 (P4 - Recommended for Cars / Medium Vehicles)",
+                    21: "Layer 21 (P5 - Recommended for Trucks & Large Vehicles)",
+                    9: "Layer 9 (SPPF - Background & Shadow Invariance)",
+                }
+                selected_hm_layer = st.selectbox(
+                    "Target Layer to Inspect",
+                    options=list(layer_options.keys()),
+                    format_func=lambda l: layer_options[l],
+                    index=0,  # Layer 15 by default
+                    key=f"layer_select_{inspect_item.get('candidate_id', 'curr')}",
+                )
+
+            with hm_col2:
+                st.write("")
+                st.write("")
+                gen_hm_btn = st.button(
+                    "⚡ Generate Heatmap",
+                    key=f"btn_hm_{inspect_item.get('candidate_id', 'curr')}",
+                    use_container_width=True,
+                )
+
+            if gen_hm_btn:
+                img_to_inspect = raw_path if raw_path.is_file() else prev_path
+                if not img_to_inspect.is_file():
+                    st.error("Image file not available for heatmap generation.")
+                else:
+                    with st.spinner(f"Analyzing neural network activations at Layer {selected_hm_layer}..."):
+                        try:
+                            cached_model = get_cached_yolo(config.MODEL_NAME)
+                            _, comparison_rgb, l_name = generate_heatmap_for_image(
+                                str(img_to_inspect),
+                                layer_idx=selected_hm_layer,
+                                model=cached_model,
+                                conf=config.CONFIDENCE_THRESHOLD,
+                            )
+                            st.image(
+                                comparison_rgb,
+                                caption=f"Detection Box (Left) vs. Eigen-CAM Heatmap (Right) — Layer {selected_hm_layer}: {l_name}",
+                                use_container_width=True,
+                            )
+                            st.info(
+                                "💡 **Cách chẩn đoán nhanh:**\n"
+                                "- **Đốm đỏ rực tập trung vào xe**: AI nhìn thấy đặc trưng tốt.\n"
+                                "- **Vùng xe bị màu xanh lam/xám nhạt**: Bị **Texture Blending** (xe bị hòa lẫn vào mặt đường bê tông/nhựa).\n"
+                                "- **Đốm đỏ bị xe lớn bên cạnh hoặc bóng đổ hút trọn**: Bị **Feature Occlusion** (xe máy bị lấn át đặc trưng)."
+                            )
+                        except Exception as e:
+                            st.error(f"Lỗi khi tạo Heatmap: {e}")
+
+            st.markdown("---")
             act_col1, act_col2, _ = st.columns([1, 1, 3])
             if act_col1.button("✅ Mark as Approved", key="insp_app"):
                 update_candidate_status(inspect_item["_meta_path"], "approved")

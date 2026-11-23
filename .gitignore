@@ -33,6 +33,11 @@ sample_video/
 *.avi
 *.mkv
 
+# Temporary debug images & heatmaps
+heatmap_*.jpg
+channels_*.jpg
+
+
 # Office temp files
 *.ods
 .~lock.*

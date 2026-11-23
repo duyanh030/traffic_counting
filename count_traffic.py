@@ -44,6 +44,12 @@ def parse_arguments():
         action="store_true",
         help="Run in headless mode without displaying the GUI window (useful for servers or batch video processing)",
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        help="Limit number of frames to process for quick benchmark/testing (0 = full video/stream)",
+    )
     return parser.parse_args()
 
 
@@ -128,6 +134,9 @@ def main():
                     continue
 
             frame_idx += 1
+            if args.max_frames > 0 and frame_idx > args.max_frames:
+                print(f"\n⏱️ Reached max frames limit ({args.max_frames}). Stopping test run.")
+                break
             clean_frame = frame.copy()
 
             # Run YOLO tracking with ByteTrack
@@ -228,6 +237,9 @@ def main():
             print(f"   ↳ By Reason          : {dict(candidate_detector.stats_by_reason)}")
         if candidate_detector.stats_by_class:
             print(f"   ↳ By Class           : {dict(candidate_detector.stats_by_class)}")
+        if candidate_detector.filtered_duplicates_count or candidate_detector.filtered_blurry_count or candidate_detector.filtered_brightness_count:
+            print(f" • Deduplication (dHash): {candidate_detector.filtered_duplicates_count} redundant frames suppressed")
+            print(f" • Quality Filtering   : {candidate_detector.filtered_blurry_count} blurry, {candidate_detector.filtered_brightness_count} extreme brightness rejected")
         print(f" • Candidates Folder    : {run_candidates_dir}")
         print(f" • Session Report JSON  : {run_candidates_dir / 'run_report.json'}")
         print(f" • Global History Log   : {config.REPORTS_DIR / 'runs_history.json'}")
