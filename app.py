@@ -352,7 +352,7 @@ def main():
 
             # --- SMART ROOT CAUSE DIAGNOSTIC ASSISTANT ---
             st.markdown("---")
-            st.subheader("🩺 AI Smart Diagnostic Assistant (Bắt bệnh & Khuyên Approve/Reject)")
+            st.subheader("🩺 AI Smart Diagnostic Assistant (Root Cause & Action Recommendation)")
             diag_img_path = raw_path if raw_path.is_file() else prev_path
             if diag_img_path.is_file():
                 try:
@@ -369,22 +369,22 @@ def main():
 
                     if rec == "APPROVE":
                         st.success(
-                            f"### 🟢 KHUYÊN BẤM APPROVE: {diag.get('title')}\n\n"
-                            f"**Phân tích:** {diag.get('explanation')}\n\n"
-                            f"👉 **Đề xuất:** Hãy bấm **✅ Mark as Approved** bên dưới để đẩy vào CVAT gán nhãn cho đợt train tới!"
+                            f"### 🟢 RECOMMENDATION: APPROVE — {diag.get('title')}\n\n"
+                            f"**Analysis:** {diag.get('explanation')}\n\n"
+                            f"👉 **Action:** Click **✅ Mark as Approved** below to push this frame to CVAT for the next retraining round!"
                         )
                     elif rec == "REJECT":
                         icon = "🟠" if verdict == "ID_SWITCH" else "⚪"
                         alert_fn = st.warning if verdict == "ID_SWITCH" else st.info
                         alert_fn(
-                            f"### {icon} KHUYÊN BẤM REJECT: {diag.get('title')}\n\n"
-                            f"**Phân tích:** {diag.get('explanation')}\n\n"
-                            f"👉 **Đề xuất:** Hãy bấm **❌ Mark as Rejected** để bỏ qua, không tốn thời gian gán nhãn vô ích."
+                            f"### {icon} RECOMMENDATION: REJECT — {diag.get('title')}\n\n"
+                            f"**Analysis:** {diag.get('explanation')}\n\n"
+                            f"👉 **Action:** Click **❌ Mark as Rejected** to discard this candidate. Do not waste annotation time."
                         )
                     else:
-                        st.info(f"ℹ️ **Thông tin:** {diag.get('explanation')}")
+                        st.info(f"ℹ️ **Info:** {diag.get('explanation')}")
                 except Exception as e:
-                    st.warning(f"Không thể chạy chẩn đoán tự động: {e}")
+                    st.warning(f"Could not execute automated diagnosis: {e}")
 
             st.markdown("### Metadata Details")
             st.json(inspect_item)
@@ -441,13 +441,13 @@ def main():
                                 use_container_width=True,
                             )
                             st.info(
-                                "💡 **Cách chẩn đoán nhanh:**\n"
-                                "- **Đốm đỏ rực tập trung vào xe**: AI nhìn thấy đặc trưng tốt.\n"
-                                "- **Vùng xe bị màu xanh lam/xám nhạt**: Bị **Texture Blending** (xe bị hòa lẫn vào mặt đường bê tông/nhựa).\n"
-                                "- **Đốm đỏ bị xe lớn bên cạnh hoặc bóng đổ hút trọn**: Bị **Feature Occlusion** (xe máy bị lấn át đặc trưng)."
+                                "💡 **Diagnostic Quick Guide:**\n"
+                                "- **Bright Red/Yellow focused on vehicle**: Neural network extracted features properly.\n"
+                                "- **Cold Blue/Uniform across road**: **Texture Blending** (vehicle blended into asphalt/concrete texture).\n"
+                                "- **Red hotspot absorbed into adjacent large vehicle/shadow**: **Feature Occlusion** (small vehicle features dominated by large neighbor)."
                             )
                         except Exception as e:
-                            st.error(f"Lỗi khi tạo Heatmap: {e}")
+                            st.error(f"Error generating heatmap: {e}")
 
             st.markdown("---")
             act_col1, act_col2, _ = st.columns([1, 1, 3])

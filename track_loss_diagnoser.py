@@ -9,7 +9,7 @@ import config
 
 
 def compute_iou(boxA: List[float], boxB: List[float]) -> float:
-    """Tính Intersection over Union (IoU) giữa 2 bounding boxes [x1, y1, x2, y2]."""
+    """Calculate Intersection over Union (IoU) between two bounding boxes [x1, y1, x2, y2]."""
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
     xB = min(boxA[2], boxB[2])
@@ -25,8 +25,8 @@ def compute_iou(boxA: List[float], boxB: List[float]) -> float:
 
 def compute_overlap_ratio(target_box: List[float], occluder_box: List[float]) -> float:
     """
-    Tính tỷ lệ diện tích của target_box bị bao phủ/đè lên bởi occluder_box.
-    Trả về từ 0.0 (không che) đến 1.0 (bị che phủ 100%).
+    Calculate the ratio of target_box area covered/overlapped by occluder_box.
+    Returns a float from 0.0 (no overlap) to 1.0 (100% occluded).
     """
     xA = max(target_box[0], occluder_box[0])
     yA = max(target_box[1], occluder_box[1])
@@ -45,24 +45,24 @@ def diagnose_candidate_frame(
     conf_threshold: float = config.CONFIDENCE_THRESHOLD,
 ) -> Dict[str, Any]:
     """
-    Chẩn đoán nguyên nhân cốt lõi khiến Candidate bị cảnh báo (Track Loss hoặc Low Confidence).
-    Phân loại:
-      1. PARTIAL_OCCLUSION -> APPROVE (Mẫu vàng che khuất 1 phần)
-      2. DETECTION_DROP    -> APPROVE (YOLO bị sụt áp confidence hoặc bỏ sót hoàn toàn)
-      3. FULL_OCCLUSION    -> REJECT  (Bị che khuất 100% sau xe lớn)
-      4. ID_SWITCH         -> REJECT  (YOLO vẫn thấy rõ, lỗi do Tracker nhảy ID)
-      5. NATURAL_EXIT      -> REJECT  (Xe đi ra khỏi mép khung hình tự nhiên)
+    Diagnose the root cause of candidate alerts (Track Loss or Low Confidence).
+    Classifications:
+      1. PARTIAL_OCCLUSION -> APPROVE (Golden Hard Positive: partially occluded)
+      2. DETECTION_DROP    -> APPROVE (YOLO confidence dipped or missed)
+      3. FULL_OCCLUSION    -> REJECT  (100% hidden behind large vehicle)
+      4. ID_SWITCH         -> REJECT  (YOLO detects fine; tracker swapped ID)
+      5. NATURAL_EXIT      -> REJECT  (Vehicle naturally exited camera boundary)
     """
     if isinstance(frame_input, (str, os.PathLike)):
         frame = cv2.imread(str(frame_input))
         if frame is None:
-            return {"error": f"Không thể đọc ảnh từ: {frame_input}"}
+            return {"error": f"Unable to read image from: {frame_input}"}
     else:
         frame = frame_input.copy()
 
     orig_h, orig_w = frame.shape[:2]
 
-    # Lấy thông tin BBox cũ của xe bị mất dấu
+    # Extract previous bounding box coordinates of the lost vehicle
     last_bbox = details.get("last_known_bbox") or details.get("bbox")
     target_class = details.get("class_name", "vehicle")
     last_conf = details.get("confidence") or details.get("last_confidence", 0.0)
@@ -72,11 +72,11 @@ def diagnose_candidate_frame(
             "verdict": "UNKNOWN",
             "recommendation": "REVIEW",
             "badge_color": "blue",
-            "title": "Không đủ tọa độ để chẩn đoán",
-            "explanation": "Candidate này không có thông tin last_known_bbox trong metadata.",
+            "title": "Insufficient coordinates for diagnosis",
+            "explanation": "This candidate does not contain last_known_bbox metadata.",
         }
 
-    # 1. Kiểm tra xe đi ra mép khung hình (Natural Exit)
+    # 1. Check natural frame exit
     margin = config.BORDER_MARGIN_PIXELS
     x1, y1, x2, y2 = last_bbox
     if x1 <= margin or y1 <= margin or x2 >= (orig_w - margin) or y2 >= (orig_h - margin):
@@ -84,16 +84,15 @@ def diagnose_candidate_frame(
             "verdict": "NATURAL_EXIT",
             "recommendation": "REJECT",
             "badge_color": "gray",
-            "title": "Xe đi ra khỏi mép khung hình (Natural Exit)",
-            "explanation": f"Chiếc {target_class} đã chạm sát đường biên mép ảnh ({orig_w}x{orig_h}). Việc mất dấu khi xe rời khung hình là hoàn toàn bình thường.",
+            "title": "Natural Frame Exit",
+            "explanation": f"The {target_class} has touched the camera border margin ({orig_w}x{orig_h}). Tracking termination upon exit is expected.",
             "detected_conf": None,
         }
 
-    # 2. Khởi tạo mô hình và quét với ngưỡng siêu nhạy (conf=0.10)
+    # 2. Run low-confidence detection pass (conf=0.10) to capture dipped detections
     if model is None:
         model = YOLO(config.MODEL_NAME)
 
-    # Chạy YOLO với conf thấp để bắt cả các trường hợp sụt confidence
     results = model(frame, conf=0.10, verbose=False)[0]
     detections = results.boxes
 
@@ -110,11 +109,10 @@ def diagnose_candidate_frame(
             cls_name = names.get(int(cls_id), "unknown")
             box_list = [float(c) for c in box]
 
-            # Kiểm tra độ khớp với vị trí xe cũ
             iou = compute_iou(last_bbox, box_list)
             overlap = compute_overlap_ratio(last_bbox, box_list)
 
-            # Nếu cùng class xe và trùng vị trí (IoU > 0.3)
+            # Match with same class at previous location
             if cls_name == target_class and iou >= 0.30:
                 matched_same_class.append({
                     "box": box_list,
@@ -122,7 +120,7 @@ def diagnose_candidate_frame(
                     "iou": iou,
                 })
 
-            # Kiểm tra xe khác (đặc biệt là xe lớn hơn: car, truck, bus) đè lên vị trí xe này
+            # Check larger vehicles (car, truck, bus, van) overlapping this position
             if cls_name in ["car", "truck", "bus", "van"] and cls_name != target_class:
                 if overlap >= 0.20:
                     occluding_vehicles.append({
@@ -132,72 +130,71 @@ def diagnose_candidate_frame(
                         "overlap_ratio": overlap,
                     })
 
-    # Sắp xếp xe che lấp theo mức độ che phủ lớn nhất
     occluding_vehicles.sort(key=lambda x: x["overlap_ratio"], reverse=True)
 
-    # 3. PHÂN TÍCH RA QUYẾT ĐỊNH CHẨN ĐOÁN
+    # 3. DIAGNOSTIC DECISION LOGIC
 
-    # Kịch bản A: Có xe lớn che lấp
+    # Scenario A: Occluded by another larger vehicle
     if occluding_vehicles:
         top_occ = occluding_vehicles[0]
         ratio = top_occ["overlap_ratio"]
         occ_name = top_occ["class_name"]
 
-        # Nếu che gần như 100% (>80% diện tích) -> FULL OCCLUSION
+        # If almost 100% occluded (>80%) -> FULL OCCLUSION
         if ratio >= 0.80:
             return {
                 "verdict": "FULL_OCCLUSION",
                 "recommendation": "REJECT",
                 "badge_color": "gray",
-                "title": f"Bị xe {occ_name} che khuất hoàn toàn ({ratio*100:.0f}%)",
-                "explanation": f"Chiếc {target_class} đã lọt hẳn vào sau thân xe {occ_name} (che khuất {ratio*100:.0f}%). Mắt người cũng khó thấy xe. Việc này thuộc trách nhiệm của Tracker (tăng track_buffer), không nên ép AI đoán mò.",
+                "title": f"Fully Occluded by {occ_name.title()} ({ratio*100:.0f}%)",
+                "explanation": f"The {target_class} is almost completely obscured behind a {occ_name} ({ratio*100:.0f}% coverage). The vehicle is not visible to humans either. Let ByteTrack handle this via track_buffer; avoid forcing the detector to hallucinate.",
                 "overlap_ratio": ratio,
                 "occluder": occ_name,
             }
         else:
-            # Che một phần (20% - 80%) nhưng mắt người vẫn thấy -> PARTIAL OCCLUSION (MẪU VÀNG!)
+            # Partially occluded (20% - 80%) but still visible -> PARTIAL OCCLUSION (GOLDEN EXAMPLE!)
             return {
                 "verdict": "PARTIAL_OCCLUSION",
                 "recommendation": "APPROVE",
                 "badge_color": "green",
-                "title": f"⭐ MẪU VÀNG: Bị {occ_name} che một phần ({ratio*100:.0f}%)",
-                "explanation": f"Chiếc {target_class} đang bị xe {occ_name} che khuất {ratio*100:.0f}%, gây ra hiện tượng Feature Occlusion (bị xe lớn nuốt đặc trưng). Mắt người vẫn thấy rõ xe máy! Cần gán nhãn để dạy AI phát hiện xe bị che.",
+                "title": f"⭐ GOLDEN SAMPLE: Partially Occluded by {occ_name.title()} ({ratio*100:.0f}%)",
+                "explanation": f"The {target_class} is {ratio*100:.0f}% covered by a {occ_name}, causing Feature Occlusion. The vehicle is still clearly visible to humans! Annotating this sample teaches YOLO to detect partially occluded vehicles.",
                 "overlap_ratio": ratio,
                 "occluder": occ_name,
             }
 
-    # Kịch bản B: YOLO tìm thấy xe ở vị trí cũ
+    # Scenario B: YOLO finds the vehicle at previous position
     if matched_same_class:
         best_match = max(matched_same_class, key=lambda x: x["confidence"])
         found_conf = best_match["confidence"]
 
-        # B1: Confidence bị tụt thấp hơn ngưỡng hoạt động
+        # B1: Confidence dipped below threshold
         if found_conf < conf_threshold:
             return {
                 "verdict": "DETECTION_DROP",
                 "recommendation": "APPROVE",
                 "badge_color": "green",
-                "title": f"YOLO bị sụt độ tin cậy (Conf: {found_conf:.2f} < {conf_threshold})",
-                "explanation": f"YOLO vẫn lờ mờ nhìn thấy chiếc {target_class} nhưng độ tin cậy chỉ đạt {found_conf:.2f} (dưới ngưỡng lọc {conf_threshold}). Cần gán nhãn để AI nâng điểm tự tin ở góc này.",
+                "title": f"YOLO Confidence Dipped (Conf: {found_conf:.2f} < {conf_threshold})",
+                "explanation": f"YOLO faintly detects the {target_class} but confidence dropped to {found_conf:.2f} (below threshold {conf_threshold}). Labeling this frame will bolster model confidence under this lighting/angle.",
                 "detected_conf": found_conf,
             }
         else:
-            # B2: YOLO nhận diện cực tốt (conf >= ngưỡng), nhưng Tracker lại báo mất dấu!
+            # B2: YOLO detected vehicle strongly, but tracker dropped/swapped ID
             return {
                 "verdict": "ID_SWITCH",
                 "recommendation": "REJECT",
                 "badge_color": "orange",
-                "title": f"Lỗi Tracker nhảy ID (YOLO vẫn bắt tốt với Conf {found_conf:.2f})",
-                "explanation": f"Mô hình YOLO hoàn toàn vô tội! Nó vẫn phát hiện xe với độ tin cậy rất cao ({found_conf:.2f}), nhưng thuật toán ByteTrack bị trượt Kalman Filter và gán ID mới. Không cần tốn công gán nhãn ảnh này.",
+                "title": f"Tracker ID Switch (YOLO detected with Conf: {found_conf:.2f})",
+                "explanation": f"YOLO detector is functioning properly with high confidence ({found_conf:.2f}). ByteTrack experienced a Kalman Filter tracking discontinuity and assigned a new ID. No need to annotate this frame.",
                 "detected_conf": found_conf,
             }
 
-    # Kịch bản C: Quét ở conf=0.10 mà YOLO vẫn hoàn toàn không thấy gì!
+    # Scenario C: Completely missed even at conf=0.10
     return {
         "verdict": "SEVERE_DETECTION_DROP",
         "recommendation": "APPROVE",
         "badge_color": "green",
-        "title": f"YOLO bỏ sót hoàn toàn chiếc {target_class} (False Negative)",
-        "explanation": f"Dù hạ ngưỡng phát hiện xuống 0.10, YOLO vẫn hoàn toàn mù tịt trước chiếc {target_class} này. Đây là lỗi nhận diện nghiêm trọng của mô hình, rất cần gán nhãn trên CVAT!",
+        "title": f"YOLO Missed {target_class.title()} (False Negative)",
+        "explanation": f"Even with threshold lowered to 0.10, YOLO completely failed to detect this {target_class}. This is a genuine detector false negative and should be annotated in CVAT.",
         "detected_conf": 0.0,
     }
