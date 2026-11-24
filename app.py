@@ -24,6 +24,8 @@ from golden_test_manager import (
     add_candidate_to_golden_set,
     load_golden_cases,
     run_regression_test,
+    draw_golden_case_preview,
+    get_golden_case_image_path,
 )
 
 st.set_page_config(
@@ -382,6 +384,7 @@ def main():
 
             raw_path = run_dir / inspect_item.get("image_file", "")
             prev_path = run_dir / inspect_item.get("preview_file", "")
+            target_img_path = raw_path if raw_path.is_file() else prev_path
 
             insp_col1, insp_col2 = st.columns(2)
             with insp_col1:
@@ -509,8 +512,8 @@ def main():
                 try:
                     g_res = add_candidate_to_golden_set(
                         inspect_item["_meta_path"],
-                        image_path=img_to_inspect,
-                        note=f"Frame #{inspect_item.get('frame_idx')} - {inspect_item.get('reason')} ({diag.get('verdict')})",
+                        image_path=target_img_path,
+                        note=f"Frame #{inspect_item.get('frame_idx')} - {inspect_item.get('reason')} ({diag.get('verdict') if 'diag' in locals() else 'manual'})",
                     )
                     st.success(f"⭐ Saved to Golden Test Set as permanent test case `{g_res['case_id']}`!")
                 except Exception as e:
@@ -851,6 +854,41 @@ def main():
                         "Added At": c.get("added_at", ""),
                     })
                 st.dataframe(g_rows, width="stretch")
+
+                # Case Detail Inspector
+                st.markdown("##### 🔍 Inspect Golden Case")
+                case_options = [c.get("case_id") for c in g_cases]
+                selected_case_id = st.selectbox(
+                    "Select Golden Test Case to inspect details:",
+                    options=case_options,
+                    format_func=lambda cid: f"{cid} ({next((c.get('target_class') for c in g_cases if c.get('case_id') == cid), '')})",
+                    key="sel_golden_case_inspect",
+                )
+
+                selected_case = next((c for c in g_cases if c.get("case_id") == selected_case_id), None)
+                if selected_case:
+                    gc_col1, gc_col2 = st.columns([3, 2])
+                    with gc_col1:
+                        prev_rgb = draw_golden_case_preview(selected_case)
+                        if prev_rgb is not None:
+                            st.image(
+                                prev_rgb,
+                                caption=f"Golden Case: {selected_case_id} — Target: {selected_case.get('target_class')} (Red Box)",
+                                width="stretch",
+                            )
+                        else:
+                            st.warning("Case image preview not available.")
+                    with gc_col2:
+                        st.markdown(f"**Case ID:** `{selected_case.get('case_id')}`")
+                        st.markdown(f"**Target Class:** `{selected_case.get('target_class')}`")
+                        st.markdown(f"**Frame Index:** `#{selected_case.get('frame_idx', 'N/A')}`")
+                        st.markdown(f"**Original Alert:** `{selected_case.get('reason', 'N/A')}`")
+                        st.markdown(f"**Baseline Model:** `{selected_case.get('baseline_version')}`")
+                        st.markdown(f"**Baseline Confidence:** `{selected_case.get('baseline_confidence'):.4f}`")
+                        st.markdown(f"**Required Threshold:** `>={selected_case.get('min_required_conf', 0.35):.2f}`")
+                        st.markdown(f"**Target Bounding Box:** `{selected_case.get('target_bbox')}`")
+                        st.markdown(f"**Note:** *{selected_case.get('note', '')}*")
+                        st.markdown(f"**Registered At:** `{selected_case.get('added_at')}`")
             else:
                 st.info("ℹ️ No Golden Test Cases registered yet. Go to **Tab 2: Detail Inspector** and click **⭐ Save to Golden Test Set** on any tricky candidate frame!")
 

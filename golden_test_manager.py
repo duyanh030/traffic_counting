@@ -38,6 +38,52 @@ def save_golden_cases(cases: List[Dict[str, Any]]):
         json.dump(cases, f, indent=2)
 
 
+def get_golden_case_image_path(case: Dict[str, Any]) -> Optional[Path]:
+    """Get absolute Path to the stored golden case image."""
+    img_rel = case.get("image_file")
+    if not img_rel:
+        return None
+    p = GOLDEN_TEST_DIR / img_rel
+    return p if p.is_file() else None
+
+
+def draw_golden_case_preview(case: Dict[str, Any]) -> Optional[np.ndarray]:
+    """Draw target bounding box and label overlay on golden case image."""
+    img_path = get_golden_case_image_path(case)
+    if not img_path:
+        return None
+
+    img = cv2.imread(str(img_path))
+    if img is None:
+        return None
+
+    t_box = case.get("target_bbox")
+    if t_box and len(t_box) == 4:
+        x1, y1, x2, y2 = map(int, t_box)
+        t_cls = case.get("target_class", "target")
+        base_conf = case.get("baseline_confidence", 0.0)
+
+        # Draw red bounding box
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+        # Label badge
+        label = f"[Golden] {t_cls} (Base: {base_conf:.2f})"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(img, (x1, max(0, y1 - th - 8)), (x1 + tw + 6, max(th + 8, y1)), (0, 0, 255), -1)
+        cv2.putText(
+            img,
+            label,
+            (x1 + 3, max(th + 2, y1 - 4)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
 def add_candidate_to_golden_set(
     meta_path_or_dict: Any,
     image_path: Optional[Path] = None,

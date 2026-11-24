@@ -29,6 +29,7 @@ reports/
 dataset/
 runs/
 cvat_exports/*.zip
+golden_test_set/
 
 
 # Video samples & data files
