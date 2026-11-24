@@ -10,6 +10,7 @@ from ultralytics import YOLO
 import config
 from dataset_manager import DatasetManager
 from model_deployer import stage_model, approve_and_deploy_model
+from golden_test_manager import run_regression_test, load_golden_cases
 
 
 def parse_arguments():
@@ -209,9 +210,9 @@ def main():
         print("❌ Training completed but best.pt was not generated.")
         return
 
-    # 4. AUTOMATED QUALITY GATE EVALUATION
+    # 4. AUTOMATED QUALITY GATE & REGRESSION SUITE EVALUATION
     print("\n" + "=" * 70)
-    print("🛡️ RUNNING AUTOMATED QUALITY GATE EVALUATION")
+    print("🛡️ RUNNING AUTOMATED QUALITY GATE & REGRESSION SUITE")
     print("=" * 70)
 
     eval_model = YOLO(str(best_weights_path))
@@ -229,11 +230,29 @@ def main():
         "recall": round(recall, 4),
     }
 
-    print(f"📊 Validation Results on Golden Set:")
+    print(f"📊 Validation Results on Dataset Splits:")
     print(f"   • mAP@0.5    : {map50:.4f}  (Quality Gate Threshold: {args.min_map50:.2f})")
     print(f"   • mAP@0.5:95 : {map50_95:.4f}")
     print(f"   • Precision  : {precision:.4f}")
     print(f"   • Recall     : {recall:.4f}")
+
+    # Run Golden Test Set Regression Suite
+    print("\n" + "-" * 70)
+    print("🧪 Evaluating Golden Test Set (Regression Suite)...")
+    golden_report = run_regression_test(
+        candidate_model_path=best_weights_path,
+        baseline_model_path=Path(base_model_path) if Path(base_model_path).is_file() else None,
+        min_confidence=config.CONFIDENCE_THRESHOLD,
+    )
+    if golden_report["total_cases"] > 0:
+        print(f"   • Golden Test Cases Passed : {golden_report['passed']}/{golden_report['total_cases']} ({golden_report['pass_rate']}%)")
+        for r in golden_report["results"]:
+            icon = "✅" if r["status"] == "PASS" else "⚠️"
+            print(f"     {icon} Case '{r['case_id']}' [{r['target_class']}]:")
+            print(f"        Base Conf: {r['baseline_conf']:.4f} -> Candidate: {r['candidate_conf']:.4f} (Delta: {r['delta_conf']:+.4f}) | Min Req: >={r['required_conf']}")
+    else:
+        print("   ℹ️ No Golden Test Cases registered yet. (Register in UI Tab 2)")
+    print("-" * 70)
 
     models_dir = config.BASE_DIR / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +269,7 @@ def main():
             base_model=base_model_path,
             epochs=args.epochs,
             dataset_manifest=ingestion_manifest,
+            regression_report=golden_report,
         )
 
         if args.auto_deploy:

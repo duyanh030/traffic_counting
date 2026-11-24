@@ -1,0 +1,20 @@
+[
+  {
+    "case_id": "cand_20261124_134305_f000440_track_loss",
+    "image_file": "images/cand_20261124_134305_f000440_track_loss.jpg",
+    "frame_idx": 440,
+    "target_class": "motorcycle",
+    "target_bbox": [
+      600.6226806640625,
+      473.2077941894531,
+      683.6348876953125,
+      614.8583984375
+    ],
+    "baseline_version": "v1.2.0",
+    "baseline_confidence": 0.3249,
+    "min_required_conf": 0.35,
+    "added_at": "2026-11-24 18:22:23",
+    "reason": "track_loss",
+    "note": "Motorcycle under overpass shadow boundary (Frame 440)"
+  }
+]

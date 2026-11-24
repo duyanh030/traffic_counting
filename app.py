@@ -20,6 +20,11 @@ from cvat_integration import (
     export_approved_to_zip,
     get_approved_candidates,
 )
+from golden_test_manager import (
+    add_candidate_to_golden_set,
+    load_golden_cases,
+    run_regression_test,
+)
 
 st.set_page_config(
     page_title="Traffic Counting - Active Learning Studio",
@@ -493,13 +498,23 @@ def main():
                             st.error(f"Error generating heatmap: {e}")
 
             st.markdown("---")
-            act_col1, act_col2, _ = st.columns([1, 1, 3])
-            if act_col1.button("✅ Mark as Approved", key="insp_app"):
+            act_col1, act_col2, act_col3 = st.columns([1, 1, 2])
+            if act_col1.button("✅ Mark as Approved", key="insp_app", width="stretch"):
                 update_candidate_status(inspect_item["_meta_path"], "approved")
                 st.rerun()
-            if act_col2.button("❌ Mark as Rejected", key="insp_rej"):
+            if act_col2.button("❌ Mark as Rejected", key="insp_rej", width="stretch"):
                 update_candidate_status(inspect_item["_meta_path"], "rejected")
                 st.rerun()
+            if act_col3.button("⭐ Save to Golden Test Set (Regression Test)", key="insp_golden", width="stretch"):
+                try:
+                    g_res = add_candidate_to_golden_set(
+                        inspect_item["_meta_path"],
+                        image_path=img_to_inspect,
+                        note=f"Frame #{inspect_item.get('frame_idx')} - {inspect_item.get('reason')} ({diag.get('verdict')})",
+                    )
+                    st.success(f"⭐ Saved to Golden Test Set as permanent test case `{g_res['case_id']}`!")
+                except Exception as e:
+                    st.error(f"Failed to add to Golden Test Set: {e}")
 
     # --- TAB 3: PUSH TO CVAT ---
     with tab_cvat:
@@ -661,8 +676,44 @@ def main():
                         val_count = len(cand_manifest.get("val_samples", []))
                         st.caption(
                             f"📦 **Source Exports ({len(z_names)}):** `{', '.join(z_names)}` | "
-                            f"⭐ **Golden Test Cases:** `{val_count} samples`"
+                            f"📁 **Validation Dataset Split:** `{val_count} samples`"
                         )
+
+                    # --- Golden Test Set Regression Report ---
+                    reg_report = cand.get("regression_report")
+                    if not reg_report:
+                        cand_weights = Path(cand_folder) / "best.pt"
+                        base_pt = Path(active_model_file) if Path(active_model_file).is_file() else (config.BASE_DIR / active_model_file)
+                        if cand_weights.is_file():
+                            reg_report = run_regression_test(
+                                candidate_model_path=cand_weights,
+                                baseline_model_path=base_pt if base_pt.is_file() else None,
+                            )
+
+                    if reg_report and reg_report.get("total_cases", 0) > 0:
+                        st.markdown("##### 🧪 Golden Test Set Regression Benchmark")
+                        p_rate = reg_report.get("pass_rate", 0.0)
+                        p_count = reg_report.get("passed", 0)
+                        t_count = reg_report.get("total_cases", 0)
+                        status_color = "green" if p_count == t_count else "orange" if p_count > 0 else "red"
+
+                        st.markdown(
+                            f"Regression Quality: :{status_color}[**{p_count}/{t_count} Passed ({p_rate}%)**] *(Confidence >= {config.CONFIDENCE_THRESHOLD})*"
+                        )
+
+                        reg_table = []
+                        for r in reg_report.get("results", []):
+                            reg_table.append({
+                                "Status": "✅ PASS" if r["status"] == "PASS" else "❌ FAIL",
+                                "Case ID": r["case_id"],
+                                "Class": r["target_class"],
+                                "Baseline Conf": f"{r['baseline_conf']:.4f}",
+                                "Candidate Conf": f"{r['candidate_conf']:.4f}",
+                                "Delta": f"{r['delta_conf']:+.4f}",
+                                "Required": f">={r['required_conf']:.2f}",
+                                "Note": r.get("note", ""),
+                            })
+                        st.dataframe(reg_table, width="stretch")
 
                     btn_col1, btn_col2, _ = st.columns([2, 2, 4])
                     with btn_col1:
@@ -721,7 +772,7 @@ def main():
                 )
             st.dataframe(hist_rows, width="stretch")
 
-            # 4. Model Reversion / Downgrade Section
+            # 6. Model Reversion / Downgrade Section
             st.markdown("---")
             st.markdown("#### ⏪ Revert / Downgrade Active Production Model")
             st.caption(
@@ -777,6 +828,31 @@ def main():
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error reverting model: {e}")
+
+            # 5. Golden Test Set Management Section
+            st.markdown("---")
+            st.markdown("#### ⭐ Golden Test Set Registry (Regression Suite)")
+            st.caption(
+                "Permanent benchmark test cases saved from difficult edge-cases (e.g. shadow transitions, lighting dips). "
+                "Any newly staged model must undergo regression testing against these cases before promotion."
+            )
+            g_cases = load_golden_cases()
+            if g_cases:
+                g_rows = []
+                for idx, c in enumerate(g_cases, 1):
+                    g_rows.append({
+                        "No.": idx,
+                        "Case ID": c.get("case_id"),
+                        "Target Class": c.get("target_class"),
+                        "Baseline Version": c.get("baseline_version"),
+                        "Baseline Conf": f"{c.get('baseline_confidence', 0.0):.4f}",
+                        "Req Threshold": f">={c.get('min_required_conf', 0.35):.2f}",
+                        "Note": c.get("note", ""),
+                        "Added At": c.get("added_at", ""),
+                    })
+                st.dataframe(g_rows, width="stretch")
+            else:
+                st.info("ℹ️ No Golden Test Cases registered yet. Go to **Tab 2: Detail Inspector** and click **⭐ Save to Golden Test Set** on any tricky candidate frame!")
 
 
     # --- TAB 5: RUN HISTORY & SUMMARY ---
