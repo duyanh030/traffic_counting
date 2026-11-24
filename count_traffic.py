@@ -105,6 +105,9 @@ def main():
     print(f"Initializing YOLO model: {model_name} (version/id: {model_identifier})")
     print(f"Candidate output folder: {run_candidates_dir}")
     model = YOLO(model_name)
+    vehicle_class_ids = config.get_vehicle_class_ids(model)
+    active_class_names = [model.names[i] for i in vehicle_class_ids]
+    print(f"Target vehicle class IDs: {vehicle_class_ids} ({', '.join(active_class_names)})")
 
     # Initialize CandidateDetector with the session-specific folder
     candidate_detector = None
@@ -151,7 +154,7 @@ def main():
                 frame,
                 persist=True,
                 tracker="bytetrack.yaml",
-                classes=config.VEHICLE_CLASSES,
+                classes=vehicle_class_ids,
                 conf=config.CONFIDENCE_THRESHOLD,
                 imgsz=config.IMAGE_SIZE,
                 verbose=False,

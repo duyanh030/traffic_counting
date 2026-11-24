@@ -13,6 +13,7 @@ from model_deployer import (
     list_staged_models,
     approve_and_deploy_model,
     reject_staged_model,
+    revert_to_version,
 )
 from cvat_integration import (
     push_approved_to_cvat,
@@ -549,7 +550,17 @@ def main():
         active_info = get_active_model_info()
         active_ver = active_info.get("active_version", "v1.0.0")
         active_model_file = active_info.get("model_path", config.MODEL_NAME)
-        active_metrics = active_info.get("history", [{}])[-1].get("metrics", {}) if active_info.get("history") else {}
+        
+        # Match active version in history rather than naive history[-1]
+        active_history_entry = next(
+            (h for h in active_info.get("history", []) if h.get("version") == active_ver), None
+        )
+        if active_history_entry:
+            active_metrics = active_history_entry.get("metrics", {})
+            last_deployed = active_history_entry.get("deployed_at", "Initial")
+        else:
+            active_metrics = active_info.get("history", [{}])[-1].get("metrics", {}) if active_info.get("history") else {}
+            last_deployed = "Initial"
         active_map50 = active_metrics.get("mAP50", 0.65)
 
         st.markdown("#### 🏆 Active Production Model")
@@ -562,7 +573,7 @@ def main():
         )
         b_c4.metric(
             "Last Deployed",
-            active_info.get("history", [{}])[-1].get("deployed_at", "Initial") if active_info.get("history") else "Initial",
+            last_deployed,
         )
 
         st.markdown("---")
@@ -656,6 +667,64 @@ def main():
                     }
                 )
             st.dataframe(hist_rows, width="stretch")
+
+            # 4. Model Reversion / Downgrade Section
+            st.markdown("---")
+            st.markdown("#### ⏪ Revert / Downgrade Active Production Model")
+            st.caption(
+                "If a newly promoted model degrades counting accuracy or causes field regressions, you can instantly rollback production to any historical version."
+            )
+
+            revertible_versions = [
+                h for h in reversed(history) if h.get("version") and h.get("version") != active_ver
+            ]
+
+            if not revertible_versions:
+                st.info("ℹ️ No previous versions available to revert to.")
+            else:
+                ver_options = [h["version"] for h in revertible_versions]
+                rev_col1, rev_col2 = st.columns([3, 2])
+                with rev_col1:
+                    target_ver = st.selectbox(
+                        "Select Target Version to Rollback to:",
+                        options=ver_options,
+                        format_func=lambda v: f"{v} (Artifact: {next((h.get('model_file') for h in revertible_versions if h.get('version') == v), '')})",
+                        key="sel_revert_ver",
+                    )
+                with rev_col2:
+                    st.write("")
+                    st.write("")
+                    revert_btn = st.button(
+                        f"⏪ Rollback to {target_ver}",
+                        type="secondary",
+                        width="stretch",
+                        key="btn_do_revert",
+                    )
+
+                target_entry = next((h for h in revertible_versions if h.get("version") == target_ver), None)
+                if target_entry:
+                    t_m = target_entry.get("metrics", {})
+                    st.info(
+                        f"**Target Version `{target_ver}` Specs:** "
+                        f"File: `{target_entry.get('model_file')}` | "
+                        f"Deployed: `{target_entry.get('deployed_at')}` | "
+                        f"mAP@0.5: `{t_m.get('mAP50', '-')}` | "
+                        f"Precision: `{t_m.get('precision', '-')}` | "
+                        f"Recall: `{t_m.get('recall', '-')}`"
+                    )
+
+                if revert_btn:
+                    try:
+                        res = revert_to_version(target_ver)
+                        st.balloons()
+                        st.success(
+                            f"✅ **Production model successfully reverted to `{res['reverted_to']}`!** "
+                            f"Production pointer `models/yolov8_traffic_latest.pt` now runs `{res['model_file']}`."
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error reverting model: {e}")
+
 
     # --- TAB 5: RUN HISTORY & SUMMARY ---
     with tab_summary:

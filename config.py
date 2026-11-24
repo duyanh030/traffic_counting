@@ -46,8 +46,29 @@ def build_rtsp_url() -> str:
 
 RTSP_URL = build_rtsp_url()
 
-# COCO vehicle class IDs: 2: car, 3: motorcycle, 5: bus, 7: truck
+# Target vehicle categories
+TARGET_VEHICLE_NAMES = ["car", "motorcycle", "bus", "truck"]
+# Legacy COCO fallback IDs: 2: car, 3: motorcycle, 5: bus, 7: truck
 VEHICLE_CLASSES = [2, 3, 5, 7]
+
+
+def get_vehicle_class_ids(model) -> list:
+    """
+    Dynamically extract target vehicle class indices based on model.names.
+    Handles standard COCO-80 models (classes [2, 3, 5, 7]) as well as
+    fine-tuned custom models (e.g. 4 classes [0, 1, 2, 3]).
+    """
+    if not hasattr(model, "names") or not model.names:
+        return VEHICLE_CLASSES
+
+    target_set = {n.lower() for n in TARGET_VEHICLE_NAMES}
+    matched = [
+        int(idx)
+        for idx, name in model.names.items()
+        if str(name).lower() in target_set
+    ]
+    return matched if matched else list(model.names.keys())
+
 
 # Detection & Tracking parameters
 LATEST_MODEL_PATH = BASE_DIR / "models" / "yolov8_traffic_latest.pt"

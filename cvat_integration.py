@@ -218,6 +218,7 @@ def generate_pre_annotations(
     """
     print(f"🤖 Generating pre-annotations with '{config.MODEL_NAME}' on {len(image_paths)} images...")
     model = YOLO(config.MODEL_NAME)
+    vehicle_class_ids = config.get_vehicle_class_ids(model)
     shapes = []
     total_boxes = 0
 
@@ -226,7 +227,7 @@ def generate_pre_annotations(
             results = model(
                 str(img_path),
                 conf=conf_threshold,
-                classes=config.VEHICLE_CLASSES,
+                classes=vehicle_class_ids,
                 imgsz=config.IMAGE_SIZE,
                 verbose=False,
             )[0]

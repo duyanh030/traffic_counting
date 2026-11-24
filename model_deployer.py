@@ -178,3 +178,139 @@ def reject_staged_model(candidate_id_or_folder: str):
 
     if cand_folder.exists() and cand_folder.is_dir():
         shutil.rmtree(cand_folder, ignore_errors=True)
+
+
+def locate_version_artifact(model_file: str) -> Optional[Path]:
+    """Locate weight file on disk from version record."""
+    if not model_file:
+        return None
+    candidates = [
+        MODELS_DIR / model_file,
+        config.BASE_DIR / model_file,
+        Path(model_file),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def revert_to_version(target_version: str) -> Dict[str, Any]:
+    """
+    Revert / downgrade active production model to a specific historical version.
+
+    1. Validates that target_version exists in models/version.json history.
+    2. Verifies that the model artifact weights exist on disk.
+    3. Copies the target version weights to yolov8_traffic_latest.pt for zero-downtime hot reload.
+    4. Updates version.json active_version and marks history statuses.
+    """
+    ensure_dirs()
+    active_data = get_active_model_info()
+    current_ver = active_data.get("active_version")
+
+    if current_ver == target_version:
+        raise ValueError(f"Version '{target_version}' is already the currently active production model.")
+
+    history = active_data.get("history", [])
+    target_entry = next((h for h in history if h.get("version") == target_version), None)
+    if not target_entry:
+        available = [h.get("version") for h in history if h.get("version")]
+        raise ValueError(
+            f"Version '{target_version}' not found in deployment history. Available versions: {available}"
+        )
+
+    model_file = target_entry.get("model_file")
+    artifact_path = locate_version_artifact(model_file)
+    if not artifact_path or not artifact_path.is_file():
+        raise FileNotFoundError(
+            f"Weight artifact '{model_file}' for version {target_version} not found on disk."
+        )
+
+    # Hot-reload update latest pointer
+    latest_pointer = MODELS_DIR / "yolov8_traffic_latest.pt"
+    shutil.copy2(artifact_path, latest_pointer)
+
+    revert_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    active_data["active_version"] = target_version
+    try:
+        active_data["model_path"] = str(artifact_path.relative_to(config.BASE_DIR))
+    except ValueError:
+        active_data["model_path"] = str(artifact_path)
+    active_data["updated_at"] = revert_time
+    active_data["last_rollback"] = {
+        "from_version": current_ver,
+        "to_version": target_version,
+        "timestamp": revert_time,
+    }
+
+    for h in history:
+        if h.get("version") == target_version:
+            h["status"] = "active"
+        else:
+            h["status"] = "archived"
+
+    with open(VERSION_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(active_data, f, indent=2)
+
+    return {
+        "reverted_to": target_version,
+        "previous_version": current_ver,
+        "model_file": model_file,
+        "model_path": str(artifact_path),
+        "timestamp": revert_time,
+        "metrics": target_entry.get("metrics", {}),
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Model Deployment & Rollback Manager")
+    parser.add_argument("--status", action="store_true", help="Print active production model status")
+    parser.add_argument(
+        "--rollback",
+        "--revert",
+        dest="rollback",
+        type=str,
+        metavar="VERSION",
+        help="Revert/downgrade production model to a historical version (e.g. v1.0.0)",
+    )
+    parser.add_argument("--list-staged", action="store_true", help="List all staged models awaiting approval")
+    args = parser.parse_args()
+
+    if args.status:
+        info = get_active_model_info()
+        print("\n==================================================")
+        print("🏆 ACTIVE PRODUCTION MODEL STATUS")
+        print("==================================================")
+        print(f" • Active Version   : {info.get('active_version')}")
+        print(f" • Model Path       : {info.get('model_path')}")
+        print(f" • Last Updated     : {info.get('updated_at', info.get('created_at'))}")
+        last_rb = info.get("last_rollback")
+        if last_rb:
+            print(f" • Last Rollback    : {last_rb.get('from_version')} -> {last_rb.get('to_version')} at {last_rb.get('timestamp')}")
+        print("==================================================\n")
+
+    elif args.rollback:
+        print(f"⏪ Reverting production model to '{args.rollback}'...")
+        try:
+            res = revert_to_version(args.rollback)
+            print("\n==================================================")
+            print("✅ MODEL ROLLBACK SUCCESSFUL!")
+            print("==================================================")
+            print(f" • Active Version   : {res['reverted_to']} (was {res['previous_version']})")
+            print(f" • Model File       : {res['model_file']}")
+            print(f" • Model Path       : {res['model_path']}")
+            print(f" • Timestamp        : {res['timestamp']}")
+            print("==================================================\n")
+        except Exception as e:
+            print(f"❌ Error during rollback: {e}")
+
+    elif args.list_staged:
+        staged = list_staged_models()
+        print(f"Total staged candidate models awaiting approval: {len(staged)}")
+        for s in staged:
+            print(f" - {s.get('candidate_id')} (Trained: {s.get('trained_at')}, Samples: {s.get('training_samples')})")
+    else:
+        parser.print_help()
+
