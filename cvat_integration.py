@@ -187,7 +187,7 @@ def get_approved_candidates(run_dir: Path) -> List[Dict[str, Any]]:
 
 
 def export_approved_to_zip(run_dir: Path, output_zip_path: Path) -> Tuple[int, List[Path]]:
-    """Package all approved raw candidate frames into a zip file."""
+    """Package all approved raw candidate frames and metadata manifest into a zip file."""
     approved = get_approved_candidates(run_dir)
     if not approved:
         raise ValueError("No candidates with status 'approved' found in this session.")
@@ -196,6 +196,27 @@ def export_approved_to_zip(run_dir: Path, output_zip_path: Path) -> Tuple[int, L
     output_zip_path.parent.mkdir(parents=True, exist_ok=True)
     exported_paths = []
 
+    # Read session report to extract model lineage
+    report_file = run_dir / "run_report.json"
+    session_report = {}
+    if report_file.is_file():
+        try:
+            with open(report_file, "r", encoding="utf-8") as f:
+                session_report = json.load(f)
+        except Exception:
+            pass
+
+    manifest = {
+        "export_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_id": run_dir.name,
+        "source_name": session_report.get("source_name", "unknown"),
+        "model_version": session_report.get("semantic_version", "unknown"),
+        "model_artifact": session_report.get("model_artifact", "unknown"),
+        "model_weights": session_report.get("model_version", "unknown"),
+        "total_approved_frames": len(sorted_approved),
+        "candidates": [item.get("candidate_id") for item in sorted_approved],
+    }
+
     with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in sorted_approved:
             rel_img = item.get("image_file", "")
@@ -203,6 +224,7 @@ def export_approved_to_zip(run_dir: Path, output_zip_path: Path) -> Tuple[int, L
             if img_path.is_file():
                 zf.write(img_path, arcname=img_path.name)
                 exported_paths.append(img_path)
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
 
     return len(exported_paths), exported_paths
 

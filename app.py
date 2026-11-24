@@ -157,8 +157,22 @@ def main():
 
     # --- SIDEBAR: RUN SELECTION ---
     st.sidebar.header("📁 Session Selector")
+    active_model_info = get_active_model_info()
+    current_active_ver = active_model_info.get("active_version", "v1.0.0")
+    current_artifact_name = Path(active_model_info.get("model_path", "yolov8n.pt")).name
+
     model_list = list(runs_tree.keys())
-    selected_model = st.sidebar.selectbox("Select Model Version", model_list)
+
+    def format_model_label(m: str) -> str:
+        if m == "yolov8_traffic_latest":
+            return f"{m} (Active: {current_active_ver})"
+        return m
+
+    selected_model = st.sidebar.selectbox(
+        "Select Model Version",
+        model_list,
+        format_func=format_model_label,
+    )
 
     available_runs = runs_tree[selected_model]
     run_options = {run["name"]: run for run in available_runs}
@@ -167,10 +181,20 @@ def main():
     run_dir = selected_run["path"]
     report = selected_run.get("report", {})
 
+    # Extract model lineage for this session run
+    run_sem_ver = report.get("semantic_version")
+    if not run_sem_ver:
+        if selected_model == "yolov8_traffic_latest":
+            run_sem_ver = current_active_ver
+        else:
+            run_sem_ver = selected_model
+    run_artifact_name = report.get("model_artifact", current_artifact_name)
+
     # Display Run Overview in Sidebar
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Session Metrics")
     if report:
+        st.sidebar.write(f"**Model Version:** `{run_sem_ver} ({run_artifact_name})`")
         st.sidebar.write(f"**Source:** `{report.get('source_name', 'Unknown')}`")
         st.sidebar.write(f"**Start Time:** `{report.get('start_time', 'N/A')}`")
         st.sidebar.write(f"**Duration:** `{report.get('duration_seconds', 0)}s`")
@@ -272,6 +296,9 @@ def main():
             end_idx = min(start_idx + page_size, len(filtered))
             page_items = filtered[start_idx:end_idx]
 
+            st.info(
+                f"📌 Showing candidates captured by Model Version: **`{run_sem_ver}`** *(Artifact: `{run_artifact_name}`)*"
+            )
             st.caption(f"Displaying candidates {start_idx + 1} - {end_idx} of {len(filtered)}")
 
             cols_per_row = 3
@@ -287,6 +314,7 @@ def main():
                         details = item.get("details", {})
                         cls_name = details.get("class_name", "vehicle")
                         conf = details.get("confidence", details.get("last_confidence", 0.0))
+                        cand_ver = item.get("model_version", run_sem_ver)
 
                         # Status badge styling
                         badge_color = {
@@ -310,7 +338,7 @@ def main():
                             else:
                                 st.warning("Image file not found.")
 
-                        st.caption(f"**Class:** {cls_name} | **Conf:** {conf:.2f}")
+                        st.caption(f"**Model:** `{cand_ver}` | **Class:** {cls_name} | **Conf:** {conf:.2f}")
 
                         # Action buttons
                         btn_c1, btn_c2 = st.columns(2)
@@ -338,6 +366,14 @@ def main():
                 format_func=lambda i: cand_names[i],
             )
             inspect_item = filtered[selected_idx]
+            cand_ver = inspect_item.get("model_version", run_sem_ver)
+            cand_art = inspect_item.get("model_artifact", run_artifact_name)
+            st.markdown(f"#### 🏷️ Candidate Lineage: `{inspect_item.get('candidate_id')}`")
+            st.caption(
+                f"Captured by Model Version: **`{cand_ver}`** | "
+                f"Weights Artifact: **`{cand_art}`** | "
+                f"Frame: **`#{inspect_item.get('frame_idx')}`**"
+            )
 
             raw_path = run_dir / inspect_item.get("image_file", "")
             prev_path = run_dir / inspect_item.get("preview_file", "")
@@ -546,6 +582,13 @@ def main():
             "Review newly retrained candidate models, evaluate validation metrics against the active production baseline, and approve promotion to production."
         )
 
+        if "deploy_success_msg" in st.session_state:
+            st.success(st.session_state.pop("deploy_success_msg"))
+            st.balloons()
+        if "revert_success_msg" in st.session_state:
+            st.success(st.session_state.pop("revert_success_msg"))
+            st.balloons()
+
         # 1. Active Production Model Baseline
         active_info = get_active_model_info()
         active_ver = active_info.get("active_version", "v1.0.0")
@@ -622,8 +665,9 @@ def main():
                         ):
                             try:
                                 res = approve_and_deploy_model(cand_folder)
-                                st.balloons()
-                                st.success(f"🎉 **Model Successfully Promoted to Production!** Version: `{res['version']}`")
+                                st.session_state["deploy_success_msg"] = (
+                                    f"🎉 **Model Successfully Promoted to Production!** Version: `{res['version']}`"
+                                )
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error deploying model: {e}")
@@ -689,16 +733,7 @@ def main():
                         "Select Target Version to Rollback to:",
                         options=ver_options,
                         format_func=lambda v: f"{v} (Artifact: {next((h.get('model_file') for h in revertible_versions if h.get('version') == v), '')})",
-                        key="sel_revert_ver",
-                    )
-                with rev_col2:
-                    st.write("")
-                    st.write("")
-                    revert_btn = st.button(
-                        f"⏪ Rollback to {target_ver}",
-                        type="secondary",
-                        width="stretch",
-                        key="btn_do_revert",
+                        key=f"sel_revert_from_{active_ver}",
                     )
 
                 target_entry = next((h for h in revertible_versions if h.get("version") == target_ver), None)
@@ -713,13 +748,22 @@ def main():
                         f"Recall: `{t_m.get('recall', '-')}`"
                     )
 
+                with rev_col2:
+                    st.write("")
+                    st.write("")
+                    revert_btn = st.button(
+                        f"⏪ Rollback to {target_ver}",
+                        type="secondary",
+                        width="stretch",
+                        key=f"btn_revert_{active_ver}_to_{target_ver}",
+                    )
+
                 if revert_btn:
                     try:
                         res = revert_to_version(target_ver)
-                        st.balloons()
-                        st.success(
-                            f"✅ **Production model successfully reverted to `{res['reverted_to']}`!** "
-                            f"Production pointer `models/yolov8_traffic_latest.pt` now runs `{res['model_file']}`."
+                        st.session_state["revert_success_msg"] = (
+                            f"🎉 **Production model successfully reverted to `{res['reverted_to']}`!** "
+                            f"Active pointer `models/yolov8_traffic_latest.pt` now runs `{res['model_file']}`."
                         )
                         st.rerun()
                     except Exception as e:
@@ -739,17 +783,26 @@ def main():
                     for h in reversed(hist_data):
                         cnt = h.get("counting_summary", {})
                         snaps = h.get("suspicious_snapshots_summary", {})
+                        sem_ver = h.get("semantic_version")
+                        if not sem_ver:
+                            m_raw = h.get("model_version", "")
+                            sem_ver = "v1.0.0" if "yolov8n" in m_raw else "v1.1.0"
+                        art_name = h.get("model_artifact")
+                        if not art_name:
+                            art_name = Path(h.get("model_version", "")).name
+
                         table_rows.append(
                             {
-                                "Run ID": h.get("run_id"),
-                                "Source": h.get("source_name"),
-                                "Model": h.get("model_version"),
-                                "Start Time": h.get("start_time"),
-                                "Duration (s)": h.get("duration_seconds"),
-                                "Frames": h.get("total_frames_processed"),
-                                "IN": cnt.get("vehicles_in", 0),
-                                "OUT": cnt.get("vehicles_out", 0),
-                                "Candidates": snaps.get("total_captured", 0),
+                                "Run ID": str(h.get("run_id")),
+                                "Source": str(h.get("source_name")),
+                                "Model Version": str(sem_ver),
+                                "Model Artifact": str(art_name),
+                                "Start Time": str(h.get("start_time")),
+                                "Duration (s)": str(h.get("duration_seconds")),
+                                "Frames": str(h.get("total_frames_processed")),
+                                "IN": str(cnt.get("vehicles_in", 0)),
+                                "OUT": str(cnt.get("vehicles_out", 0)),
+                                "Candidates": str(snaps.get("total_captured", 0)),
                             }
                         )
                     st.dataframe(table_rows, width="stretch")

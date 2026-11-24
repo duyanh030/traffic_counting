@@ -12,7 +12,7 @@
         "mAP50": 0.65,
         "mAP50_95": 0.45
       },
-      "status": "archived"
+      "status": "active"
     },
     {
       "version": "v1.1.0",
@@ -25,14 +25,28 @@
         "precision": 0.7549,
         "recall": 0.9435
       },
-      "status": "active",
+      "status": "archived",
       "staged_from": "staging_20261123_202118"
+    },
+    {
+      "version": "v1.1.0",
+      "model_file": "yolov8_traffic_v1.1.0.pt",
+      "deployed_at": "2026-11-24 12:35:03",
+      "training_samples": 5,
+      "metrics": {
+        "mAP50": 0.9137,
+        "mAP50_95": 0.8638,
+        "precision": 0.7132,
+        "recall": 0.9588
+      },
+      "status": "active",
+      "staged_from": "staging_20261124_123425"
     }
   ],
-  "updated_at": "2026-11-23 21:23:37",
+  "updated_at": "2026-11-24 12:35:03",
   "last_rollback": {
-    "from_version": "v1.0.0",
-    "to_version": "v1.1.0",
-    "timestamp": "2026-11-23 21:23:37"
+    "from_version": "v1.1.0",
+    "to_version": "v1.0.0",
+    "timestamp": "2026-11-24 11:07:11"
   }
 }

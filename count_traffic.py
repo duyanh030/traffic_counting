@@ -9,6 +9,7 @@ import supervision as sv
 
 import config
 from candidate_detector import CandidateDetector
+from model_deployer import get_active_model_info
 
 # Optimize RTSP streaming over TCP to prevent packet loss / tearing over Wi-Fi
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -109,10 +110,20 @@ def main():
     active_class_names = [model.names[i] for i in vehicle_class_ids]
     print(f"Target vehicle class IDs: {vehicle_class_ids} ({', '.join(active_class_names)})")
 
-    # Initialize CandidateDetector with the session-specific folder
+    active_info = get_active_model_info()
+    semantic_ver = active_info.get("active_version", "v1.0.0")
+    model_artifact = Path(active_info.get("model_path", model_name)).name
+    print(f"Active Model Semantic Version: {semantic_ver} (Artifact: {model_artifact})")
+
+    # Initialize CandidateDetector with the session-specific folder and model lineage
     candidate_detector = None
     if args.save_candidates:
-        candidate_detector = CandidateDetector(run_candidates_dir=run_candidates_dir)
+        candidate_detector = CandidateDetector(
+            run_candidates_dir=run_candidates_dir,
+            model_name=model_name,
+            semantic_version=semantic_ver,
+            model_artifact=model_artifact,
+        )
 
     # Set horizontal counting line based on configured height percentage
     line_y = int(height * config.COUNTING_LINE_POSITION)
@@ -211,11 +222,15 @@ def main():
 
     # Save detailed run report
     saved_report = None
+    active_info = get_active_model_info()
+    semantic_ver = active_info.get("active_version", "v1.0.0")
+
     if candidate_detector is not None:
         saved_report = candidate_detector.save_run_report(
             source=source,
             source_name=source_name,
             model_name=model_name,
+            semantic_version=semantic_ver,
             start_time_str=start_time_str,
             end_time_str=end_time_str,
             duration_seconds=duration_seconds,
@@ -231,7 +246,8 @@ def main():
     print(f" • Run Session ID       : {run_id}")
     print(f" • Video Source Name    : {source_name}")
     print(f" • Video Source Path    : {mask_url(source) if not is_video_file else source}")
-    print(f" • Model Version / Name : {model_name}")
+    print(f" • Model Weights Path   : {model_name}")
+    print(f" • Active Model Version : {semantic_ver}")
     print(f" • Start Time           : {start_time_str}")
     print(f" • End Time             : {end_time_str}")
     print(f" • Duration             : {duration_seconds:.2f} seconds (~{duration_seconds/60:.1f} mins) | Avg FPS: {avg_fps}")

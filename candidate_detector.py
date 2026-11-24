@@ -24,6 +24,9 @@ class CandidateDetector:
     def __init__(
         self,
         run_candidates_dir: Optional[Path] = None,
+        model_name: str = "yolov8n.pt",
+        semantic_version: str = "v1.0.0",
+        model_artifact: str = "yolov8n.pt",
         low_conf_range: tuple = (config.LOW_CONF_MIN, config.LOW_CONF_MAX),
         track_loss_min_frames: int = config.TRACK_LOSS_MIN_FRAMES,
         cooldown_frames: int = config.SNAPSHOT_COOLDOWN_FRAMES,
@@ -39,6 +42,11 @@ class CandidateDetector:
         self.img_dir = self.candidates_dir / "images"
         self.preview_dir = self.candidates_dir / "previews"
         self.meta_dir = self.candidates_dir / "metadata"
+
+        # Model provenance metadata
+        self.model_name = model_name
+        self.semantic_version = semantic_version
+        self.model_artifact = model_artifact
 
         # Ensure output directories exist
         self.img_dir.mkdir(parents=True, exist_ok=True)
@@ -225,7 +233,7 @@ class CandidateDetector:
                 cv2.LINE_AA,
             )
 
-        banner_text = f"Candidate Alert: {reason.upper()} (Frame {frame_idx})"
+        banner_text = f"[{self.semantic_version}] Alert: {reason.upper()} (Frame {frame_idx})"
         cv2.putText(
             preview,
             banner_text,
@@ -243,6 +251,9 @@ class CandidateDetector:
             "candidate_id": candidate_id,
             "frame_idx": frame_idx,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model_version": self.semantic_version,
+            "model_artifact": self.model_artifact,
+            "model_weights": self.model_name,
             "reason": reason,
             "details": details,
             "image_file": f"images/{candidate_id}.jpg",
@@ -374,6 +385,7 @@ class CandidateDetector:
         total_frames: int,
         vehicles_in: int,
         vehicles_out: int,
+        semantic_version: str = "v1.0.0",
     ) -> Dict[str, Any]:
         """
         Generate and save a detailed run report including deduplication & quality metrics.
@@ -386,6 +398,9 @@ class CandidateDetector:
             "source_name": source_name,
             "source_path": clean_source_path,
             "model_version": model_name,
+            "semantic_version": getattr(self, "semantic_version", semantic_version),
+            "model_artifact": getattr(self, "model_artifact", "yolov8n.pt"),
+            "model_weights": model_name,
             "start_time": start_time_str,
             "end_time": end_time_str,
             "duration_seconds": round(duration_seconds, 2),
@@ -440,6 +455,8 @@ class CandidateDetector:
                     "run_id",
                     "source_name",
                     "model_version",
+                    "semantic_version",
+                    "model_artifact",
                     "start_time",
                     "end_time",
                     "duration_sec",
@@ -454,6 +471,8 @@ class CandidateDetector:
                 report_data["run_id"],
                 report_data["source_name"],
                 report_data["model_version"],
+                report_data["semantic_version"],
+                report_data["model_artifact"],
                 report_data["start_time"],
                 report_data["end_time"],
                 report_data["duration_seconds"],
