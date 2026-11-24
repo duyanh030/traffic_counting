@@ -51,6 +51,7 @@ def stage_model(
     samples_count: int,
     base_model: str,
     epochs: int,
+    dataset_manifest: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Stage a newly trained model candidate awaiting human review on the UI."""
     ensure_dirs()
@@ -70,6 +71,7 @@ def stage_model(
         "metrics": metrics,
         "base_model": str(base_model),
         "status": "pending_approval",
+        "dataset_manifest": dataset_manifest,
     }
 
     with open(target_dir / "metadata.json", "w", encoding="utf-8") as f:

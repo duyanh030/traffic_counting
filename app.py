@@ -655,6 +655,15 @@ def main():
                     m_col3.metric("Recall", f"{cand_r:.4f}")
                     m_col4.metric("Training Samples", f"{cand_samples} ({cand_epochs} epochs)")
 
+                    cand_manifest = cand.get("dataset_manifest")
+                    if cand_manifest:
+                        z_names = [z.get("archive_name") for z in cand_manifest.get("processed_zips", [])]
+                        val_count = len(cand_manifest.get("val_samples", []))
+                        st.caption(
+                            f"📦 **Source Exports ({len(z_names)}):** `{', '.join(z_names)}` | "
+                            f"⭐ **Golden Test Cases:** `{val_count} samples`"
+                        )
+
                     btn_col1, btn_col2, _ = st.columns([2, 2, 4])
                     with btn_col1:
                         if st.button(

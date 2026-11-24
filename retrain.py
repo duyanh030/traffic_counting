@@ -135,17 +135,18 @@ def main():
     print("=" * 70)
 
     # 1. DATASET INGESTION
+    ingestion_manifest = None
     if args.zip:
         zip_path = Path(args.zip)
-        print(f"\n📥 Ingesting new dataset from: {zip_path}")
+        print(f"\n📥 Ingesting single dataset archive: {zip_path}")
         dm.extract_and_ingest_zip(zip_path, val_ratio=0.2)
     else:
-        # Check cvat_exports/ or dataset/imports/ for new zip files
-        candidate_zips = list(config.CVAT_EXPORTS_DIR.glob("*.zip")) + list(dm.imports_dir.glob("*.zip"))
+        # Consolidate all exports in cvat_exports/ or dataset/imports/
+        candidate_zips = list(config.CVAT_EXPORTS_DIR.glob("*.zip"))
         if candidate_zips:
-            latest_zip = max(candidate_zips, key=lambda p: p.stat().st_mtime)
-            print(f"\n📥 Auto-detected new dataset export: {latest_zip.name} (from {latest_zip.parent.name}/)")
-            dm.extract_and_ingest_zip(latest_zip, val_ratio=0.2)
+            ingestion_manifest = dm.ingest_all_cvat_exports(config.CVAT_EXPORTS_DIR, val_ratio=0.2)
+        elif list(dm.imports_dir.glob("*.zip")):
+            ingestion_manifest = dm.ingest_all_cvat_exports(dm.imports_dir, val_ratio=0.2)
 
     stats = dm.get_stats()
     print(f"\n📊 Current Dataset Summary:")
@@ -248,6 +249,7 @@ def main():
             samples_count=stats["total"],
             base_model=base_model_path,
             epochs=args.epochs,
+            dataset_manifest=ingestion_manifest,
         )
 
         if args.auto_deploy:

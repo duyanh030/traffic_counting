@@ -52,6 +52,12 @@ def parse_arguments():
         help="Run in headless mode without displaying the GUI window (useful for servers or batch video processing)",
     )
     parser.add_argument(
+        "--line-position",
+        type=float,
+        default=config.COUNTING_LINE_POSITION,
+        help=f"Vertical position of the counting line as a fraction of frame height (0.0=top, 0.5=center, 1.0=bottom, default: {config.COUNTING_LINE_POSITION})",
+    )
+    parser.add_argument(
         "--max-frames",
         type=int,
         default=0,
@@ -126,7 +132,9 @@ def main():
         )
 
     # Set horizontal counting line based on configured height percentage
-    line_y = int(height * config.COUNTING_LINE_POSITION)
+    line_pos = args.line_position
+    line_y = int(height * line_pos)
+    print(f"Counting line position: y={line_y} ({line_pos * 100:.1f}% frame height)")
     line_zone = sv.LineZone(
         start=sv.Point(30, line_y),
         end=sv.Point(width - 30, line_y)

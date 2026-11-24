@@ -83,7 +83,7 @@ else:
 
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 IMAGE_SIZE = int(os.getenv("IMAGE_SIZE", "640"))
-COUNTING_LINE_POSITION = float(os.getenv("COUNTING_LINE_POSITION", "0.6"))
+COUNTING_LINE_POSITION = float(os.getenv("COUNTING_LINE_POSITION", "0.5"))
 
 # Candidate Detector / Active Learning parameters
 CANDIDATES_DIR = BASE_DIR / "candidates"

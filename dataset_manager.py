@@ -4,7 +4,7 @@ import shutil
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 import config
@@ -175,6 +175,122 @@ class DatasetManager:
             f"✅ Ingested successfully: {len(train_pairs)} images to train, {len(val_pairs)} images to val."
         )
         return len(pairs)
+
+    def ingest_all_cvat_exports(self, exports_dir: Path, val_ratio: float = 0.2) -> Dict[str, Any]:
+        """
+        Extract and ingest ALL CVAT zip exports in exports_dir.
+        Pools all unique labeled image-label pairs across all zips,
+        then performs a single unified stratified train/val split.
+        Returns a detailed ingestion manifest dictionary.
+        """
+        import time
+
+        zip_files = sorted(exports_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not zip_files:
+            return {"total_samples": 0, "processed_zips": []}
+
+        temp_extract = self.root / "_temp_extract_all"
+        if temp_extract.exists():
+            shutil.rmtree(temp_extract)
+        temp_extract.mkdir(parents=True, exist_ok=True)
+
+        print("\n" + "=" * 70)
+        print(f"📦 CVAT EXPORTS INGESTION & CONSOLIDATION ({len(zip_files)} archives detected)")
+        print("=" * 70)
+
+        image_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
+        pairs_dict: Dict[str, Tuple[Path, Optional[Path]]] = {}
+        processed_zips_info = []
+
+        for idx, z in enumerate(zip_files, 1):
+            z_dir = temp_extract / z.stem
+            z_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(z, "r") as zf:
+                zf.extractall(z_dir)
+
+            z_size_kb = round(z.stat().st_size / 1024, 1)
+            z_mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(z.stat().st_mtime))
+            z_images = []
+
+            for p in z_dir.rglob("*"):
+                if p.is_file() and p.suffix.lower() in image_extensions:
+                    matching_txt = p.with_suffix(".txt")
+                    if not matching_txt.is_file():
+                        matching_txt = p.parent.parent / "labels" / f"{p.stem}.txt"
+                    lbl_path = matching_txt if matching_txt.is_file() else None
+                    pairs_dict[p.name] = (p, lbl_path)
+                    z_images.append(p.name)
+
+            print(f" [{idx}/{len(zip_files)}] 📄 {z.name} ({z_size_kb:,} KB | Exported: {z_mtime})")
+            print(f"       ↳ Contains {len(z_images)} labeled image(s):")
+            for img_name in z_images[:4]:
+                print(f"         • {img_name}")
+            if len(z_images) > 4:
+                print(f"         ... and {len(z_images) - 4} more image(s)")
+
+            processed_zips_info.append(
+                {
+                    "archive_name": z.name,
+                    "size_kb": z_size_kb,
+                    "modified_at": z_mtime,
+                    "images_count": len(z_images),
+                    "images": z_images,
+                }
+            )
+
+        if not pairs_dict:
+            shutil.rmtree(temp_extract, ignore_errors=True)
+            print("\n❌ No valid image-label pairs found in any export archive.")
+            return {"total_samples": 0, "processed_zips": processed_zips_info}
+
+        print("\n" + "-" * 70)
+        print(f"🔍 CONSOLIDATED DATASET: {len(pairs_dict)} Unique Labeled Image-Label Pairs")
+        print("-" * 70)
+
+        train_pairs, val_pairs = stratified_split_by_scenario(list(pairs_dict.values()), val_ratio=val_ratio)
+
+        # Clean destination directories for fresh stratified sync
+        for d in [self.train_img_dir, self.train_lbl_dir, self.val_img_dir, self.val_lbl_dir]:
+            shutil.rmtree(d, ignore_errors=True)
+            d.mkdir(parents=True, exist_ok=True)
+
+        # Ingest train pairs
+        for img, lbl in train_pairs:
+            shutil.copy2(img, self.train_img_dir / img.name)
+            dest_lbl = self.train_lbl_dir / f"{img.stem}.txt"
+            if lbl and lbl.is_file():
+                shutil.copy2(lbl, dest_lbl)
+            else:
+                dest_lbl.touch()
+
+        # Ingest val pairs (Golden Test Set)
+        for img, lbl in val_pairs:
+            shutil.copy2(img, self.val_img_dir / img.name)
+            dest_lbl = self.val_lbl_dir / f"{img.stem}.txt"
+            if lbl and lbl.is_file():
+                shutil.copy2(lbl, dest_lbl)
+            else:
+                dest_lbl.touch()
+
+        # Cleanup temp
+        shutil.rmtree(temp_extract, ignore_errors=True)
+
+        print("\n⭐ GOLDEN TEST CASES (Validation Benchmark for Quality Gate):")
+        for i, (v_img, v_lbl) in enumerate(val_pairs, 1):
+            tag = get_scenario_tag(v_img, v_lbl)
+            print(f"   [{i}] {v_img.name} (Scenario: {tag})")
+
+        print("\n✅ Stratified Synchronization Complete:")
+        print(f"   • Training Set    : {len(train_pairs)} images (dataset/train/images)")
+        print(f"   • Golden Test Set : {len(val_pairs)} images (dataset/val/images)")
+        print("=" * 70 + "\n")
+
+        return {
+            "total_samples": len(pairs_dict),
+            "train_samples": [img.name for img, _ in train_pairs],
+            "val_samples": [img.name for img, _ in val_pairs],
+            "processed_zips": processed_zips_info,
+        }
 
     def generate_yaml(self) -> Path:
         """
