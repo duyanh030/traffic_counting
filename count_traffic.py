@@ -4,6 +4,7 @@ import re
 import time
 from pathlib import Path
 import cv2
+import numpy as np
 from ultralytics import YOLO
 import supervision as sv
 
@@ -151,6 +152,14 @@ def main():
     # Rewind to frame 0
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+    # Initialize custom ByteTrack config path
+    custom_tracker_cfg = config.BASE_DIR / "bytetrack.yaml"
+    tracker_config_arg = str(custom_tracker_cfg) if custom_tracker_cfg.is_file() else "bytetrack.yaml"
+    print(f"Tracking engine: ByteTrack (Config: {tracker_config_arg}, Agnostic NMS: Enabled)")
+
+    # Dictionary to maintain smoothed/majority class for each vehicle track
+    track_class_history = {}  # {tracker_id: {class_id: count}}
+
     try:
         while cap.isOpened():
             ret, frame = cap.read()
@@ -168,19 +177,31 @@ def main():
                 break
             clean_frame = frame.copy()
 
-            # Run YOLO tracking with ByteTrack
+            # Run YOLO tracking with ByteTrack and Agnostic NMS
             results = model.track(
                 frame,
                 persist=True,
-                tracker="bytetrack.yaml",
+                tracker=tracker_config_arg,
                 classes=vehicle_class_ids,
                 conf=config.CONFIDENCE_THRESHOLD,
                 imgsz=config.IMAGE_SIZE,
+                agnostic_nms=True,
                 verbose=False,
             )[0]
 
             # Convert detections to Supervision format
             detections = sv.Detections.from_ultralytics(results)
+
+            # Smooth class prediction across track lifetime (Majority Voting)
+            if detections.tracker_id is not None and len(detections) > 0:
+                smoothed_class_ids = []
+                for cid, tid in zip(detections.class_id, detections.tracker_id):
+                    hist = track_class_history.setdefault(tid, {})
+                    hist[cid] = hist.get(cid, 0) + 1
+                    # Pick class with majority occurrence
+                    majority_cid = max(hist, key=hist.get)
+                    smoothed_class_ids.append(majority_cid)
+                detections.class_id = np.array(smoothed_class_ids, dtype=int)
 
             # Active Learning: Detect potential errors (track loss, low confidence)
             if candidate_detector is not None:

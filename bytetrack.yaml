@@ -1,0 +1,10 @@
+# Ultralytics ByteTrack configuration tuned for robust traffic tracking
+# Docs: https://docs.ultralytics.com/modes/track
+
+tracker_type: bytetrack
+track_high_thresh: 0.35    # First-stage match threshold
+track_low_thresh: 0.15     # Second-stage threshold for weak/shadowed detections
+new_track_thresh: 0.35     # Minimum confidence to initialize a new tracking ID
+track_buffer: 50           # Frames to preserve lost tracks (increased from 30 for occlusions)
+match_thresh: 0.75         # Association IoU matching threshold
+fuse_score: True           # Fuse detection score with motion IoU for matching

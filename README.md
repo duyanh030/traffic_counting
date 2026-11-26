@@ -44,7 +44,7 @@ An automated, end-to-end traffic detection, tracking, counting, and active learn
 
 - **Multi-Source Input:** Process live RTSP streams or local video files (`.mp4`, `.avi`, `.mkv`).
 - **Real-Time Vehicle Detection:** Powered by Ultralytics YOLOv8 (detects cars, motorcycles, buses, and trucks).
-- **Robust Multi-Object Tracking:** Native ByteTrack algorithm integration (`bytetrack.yaml`) for cross-frame ID persistence.
+- **Robust Multi-Object Tracking:** Native ByteTrack algorithm integration (`bytetrack.yaml`) with **Class-Agnostic NMS** and **Majority Voting Class Smoothing** for rock-solid cross-frame ID persistence (prevents duplicate counting and eliminates ID-switching track loss alerts).
 - **Directional Traffic Counting:** Uses Supervision's `LineZone` to count incoming (IN) and outgoing (OUT) vehicles across a virtual boundary.
 - **Active Learning Candidate Capture (`CandidateDetector`):**
   - **Track-loss Detection:** Automatically detects and snapshots vehicles that vanish abruptly in the active lane (potential False Negatives).
@@ -173,8 +173,13 @@ python view_channels.py candidates/images/sample.jpg -l 15 --cmap jet
 ### Step 4: Retrain, Golden Regression Test & Governed Deployment
 Run the automated retraining engine on the exported CVAT zip:
 ```bash
-python retrain.py --zip /path/to/task_traffic_yolo_1.1.zip --epochs 30
+python retrain.py --epochs 30 --freeze 10
 ```
+- **CLI Hyperparameter Tuning Options:**
+  - `--freeze N`: Freeze first N layers to preserve pretrained COCO features (e.g. `--freeze 10` locks Backbone, `--freeze 22` trains Detect Head only). Prevents Catastrophic Forgetting on small datasets.
+  - `--optimizer AdamW`: Explicit optimizer selection (`AdamW`, `SGD`, or `auto`).
+  - `--lr 0.001`: Initial learning rate.
+  - `--epochs 30`: Number of fine-tuning epochs.
 - During retraining:
   - Evaluates validation metrics on dataset split ($mAP@0.5$).
   - **Runs Golden Test Set Regression Suite automatically**: Tests the newly trained model against all registered edge cases (e.g. Frame #440) and reports the exact confidence increase (e.g. `0.32 -> 0.68`).

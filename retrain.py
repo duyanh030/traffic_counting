@@ -42,6 +42,18 @@ def parse_arguments():
         help="Initial learning rate for fine-tuning (default: 0.001)",
     )
     parser.add_argument(
+        "--freeze",
+        type=int,
+        default=0,
+        help="Freeze first N layers to preserve pretrained COCO features (e.g. 10 for backbone, 22 for head-only, default: 0)",
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="auto",
+        help="Optimizer choice ('AdamW', 'SGD', or 'auto', default: auto)",
+    )
+    parser.add_argument(
         "--base-model",
         type=str,
         default=None,
@@ -174,8 +186,21 @@ def main():
         batch_size = 16 if torch.cuda.is_available() else 8
 
     # 3. FINE-TUNING WITH PRODUCTION DATA AUGMENTATION
+    freeze_n = args.freeze
     print("\n" + "-" * 70)
     print("🔥 Starting Fine-Tuning with Advanced Data Augmentation...")
+    if freeze_n > 0:
+        freeze_desc = (
+            "Complete Backbone (Layers 0-9)"
+            if freeze_n == 10
+            else "Backbone + Neck (Layers 0-21)"
+            if freeze_n >= 22
+            else f"First {freeze_n} Layers"
+        )
+        print(f"   🔒 Frozen Layers: {freeze_n} ({freeze_desc} preserved from base model)")
+    else:
+        print("   🔓 Full Model Tuning (All layers trainable)")
+    print(f"   ↳ Optimizer: {args.optimizer} | Learning Rate: {args.lr}")
     print("   ↳ Mosaic: 1.0 (4-angle cross-stitching)")
     print("   ↳ MixUp: 0.15 (blended occlusion)")
     print("   ↳ HSV Augmentation: H=0.015, S=0.7, V=0.4 (camera/weather shifts)")
@@ -184,26 +209,31 @@ def main():
     print("-" * 70)
 
     model = YOLO(base_model_path)
-    train_results = model.train(
-        data=str(yaml_path),
-        epochs=args.epochs,
-        batch=batch_size,
-        imgsz=config.IMAGE_SIZE,
-        lr0=args.lr,
-        # --- DATA AUGMENTATION PARAMETERS (FROM check.md) ---
-        mosaic=1.0,
-        mixup=0.15,
-        hsv_h=0.015,
-        hsv_s=0.7,
-        hsv_v=0.4,
-        degrees=10.0,
-        scale=0.5,
-        perspective=0.0005,
-        fliplr=0.5,
-        amp=True,
-        plots=True,
-        verbose=True,
-    )
+    train_args = {
+        "data": str(yaml_path),
+        "epochs": args.epochs,
+        "batch": batch_size,
+        "imgsz": config.IMAGE_SIZE,
+        "lr0": args.lr,
+        "mosaic": 1.0,
+        "mixup": 0.15,
+        "hsv_h": 0.015,
+        "hsv_s": 0.7,
+        "hsv_v": 0.4,
+        "degrees": 10.0,
+        "scale": 0.5,
+        "perspective": 0.0005,
+        "fliplr": 0.5,
+        "amp": True,
+        "plots": True,
+        "verbose": True,
+    }
+    if freeze_n > 0:
+        train_args["freeze"] = freeze_n
+    if args.optimizer != "auto":
+        train_args["optimizer"] = args.optimizer
+
+    train_results = model.train(**train_args)
 
     best_weights_path = Path(train_results.save_dir) / "weights" / "best.pt"
     if not best_weights_path.is_file():
