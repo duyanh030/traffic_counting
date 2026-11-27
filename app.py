@@ -401,6 +401,25 @@ def main():
                 else:
                     st.error("Preview image not found.")
 
+            # --- ACTION BAR (IMMEDIATELY BELOW IMAGES FOR FAST TRIAGE) ---
+            act_col1, act_col2, act_col3 = st.columns([1, 1, 2])
+            if act_col1.button("✅ Mark as Approved", key="insp_app_top", width="stretch", type="primary"):
+                update_candidate_status(inspect_item["_meta_path"], "approved")
+                st.rerun()
+            if act_col2.button("❌ Mark as Rejected", key="insp_rej_top", width="stretch"):
+                update_candidate_status(inspect_item["_meta_path"], "rejected")
+                st.rerun()
+            if act_col3.button("⭐ Save to Golden Test Set (Regression Test)", key="insp_golden_top", width="stretch"):
+                try:
+                    g_res = add_candidate_to_golden_set(
+                        inspect_item["_meta_path"],
+                        image_path=target_img_path,
+                        note=f"Frame #{inspect_item.get('frame_idx')} - {inspect_item.get('reason')} ({diag.get('verdict') if 'diag' in locals() else 'manual'})",
+                    )
+                    st.success(f"⭐ Saved to Golden Test Set as permanent test case `{g_res['case_id']}`!")
+                except Exception as e:
+                    st.error(f"Failed to add to Golden Test Set: {e}")
+
             # --- SMART ROOT CAUSE DIAGNOSTIC ASSISTANT ---
             st.markdown("---")
             st.subheader("🩺 AI Smart Diagnostic Assistant (Root Cause & Action Recommendation)")
@@ -501,14 +520,14 @@ def main():
                             st.error(f"Error generating heatmap: {e}")
 
             st.markdown("---")
-            act_col1, act_col2, act_col3 = st.columns([1, 1, 2])
-            if act_col1.button("✅ Mark as Approved", key="insp_app", width="stretch"):
+            act_col1_b, act_col2_b, act_col3_b = st.columns([1, 1, 2])
+            if act_col1_b.button("✅ Mark as Approved", key="insp_app_bottom", width="stretch"):
                 update_candidate_status(inspect_item["_meta_path"], "approved")
                 st.rerun()
-            if act_col2.button("❌ Mark as Rejected", key="insp_rej", width="stretch"):
+            if act_col2_b.button("❌ Mark as Rejected", key="insp_rej_bottom", width="stretch"):
                 update_candidate_status(inspect_item["_meta_path"], "rejected")
                 st.rerun()
-            if act_col3.button("⭐ Save to Golden Test Set (Regression Test)", key="insp_golden", width="stretch"):
+            if act_col3_b.button("⭐ Save to Golden Test Set (Regression Test)", key="insp_golden_bottom", width="stretch"):
                 try:
                     g_res = add_candidate_to_golden_set(
                         inspect_item["_meta_path"],

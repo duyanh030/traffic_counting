@@ -74,6 +74,10 @@ class CandidateDetector:
 
         # Tracking state cache: tracker_id -> dict
         self.active_tracks: Dict[int, Dict[str, Any]] = {}
+        # Pending track-loss buffer to avoid false alarms on temporary 1-2 frame dips
+        # {tracker_id: {"candidate_frame": frame, "frame_idx": int, "details": dict, "highlight_bbox": bbox, "missing_since": int}}
+        self.pending_track_losses: Dict[int, Dict[str, Any]] = {}
+        self.track_loss_persistence_frames = 3  # Must be missing for at least 3 consecutive frames
         # Cooldown registry for individual tracker IDs
         self.cooldown_registry: Dict[str, int] = {}
 
@@ -334,22 +338,14 @@ class CandidateDetector:
                             highlight_bbox=bbox,
                         )
 
-        # 2. CHECK TRACK LOSS (False Negative Detection)
-        missing_ids = [
-            tid
-            for tid, tinfo in self.active_tracks.items()
-            if tid not in current_tracked_ids and tinfo["last_frame"] == frame_idx - 1
-        ]
-
-        for tid in missing_ids:
-            tinfo = self.active_tracks[tid]
-            frame_count = tinfo["frame_count"]
-            last_bbox = tinfo["last_bbox"]
-
-            if frame_count >= self.track_loss_min_frames:
-                if not self.is_near_border(last_bbox, frame.shape):
-                    cooldown_key = f"trackloss_id_{tid}"
-                    if self.should_capture_object(cooldown_key, frame_idx):
+        # 2. CHECK TRACK LOSS (False Negative Detection with Persistence Verification)
+        # If a track disappears, put it in pending_track_losses first
+        for tid, tinfo in self.active_tracks.items():
+            if tid not in current_tracked_ids and tinfo["last_frame"] == frame_idx - 1:
+                frame_count = tinfo["frame_count"]
+                last_bbox = tinfo["last_bbox"]
+                if frame_count >= self.track_loss_min_frames and not self.is_near_border(last_bbox, frame.shape):
+                    if tid not in self.pending_track_losses:
                         details = {
                             "tracker_id": int(tid),
                             "class_name": tinfo["class_name"],
@@ -357,13 +353,33 @@ class CandidateDetector:
                             "last_known_bbox": [float(c) for c in last_bbox],
                             "last_confidence": tinfo["confidence"],
                         }
-                        self.save_candidate(
-                            frame=frame,
-                            frame_idx=frame_idx,
-                            reason="track_loss",
-                            details=details,
-                            highlight_bbox=last_bbox,
-                        )
+                        self.pending_track_losses[tid] = {
+                            "frame": frame.copy(),
+                            "frame_idx": frame_idx,
+                            "details": details,
+                            "highlight_bbox": last_bbox,
+                            "missing_since": frame_idx,
+                        }
+
+        # If a pending lost track reappears, cancel the false alarm!
+        for tid in list(self.pending_track_losses.keys()):
+            if tid in current_tracked_ids:
+                del self.pending_track_losses[tid]
+
+        # If a pending lost track remains missing for >= track_loss_persistence_frames, commit snapshot!
+        for tid in list(self.pending_track_losses.keys()):
+            p = self.pending_track_losses[tid]
+            if frame_idx - p["missing_since"] >= self.track_loss_persistence_frames:
+                cooldown_key = f"trackloss_id_{tid}"
+                if self.should_capture_object(cooldown_key, p["frame_idx"]):
+                    self.save_candidate(
+                        frame=p["frame"],
+                        frame_idx=p["frame_idx"],
+                        reason="track_loss",
+                        details=p["details"],
+                        highlight_bbox=p["highlight_bbox"],
+                    )
+                del self.pending_track_losses[tid]
 
         # Cleanup tracks inactive for > 30 frames
         expired_ids = [
@@ -373,6 +389,8 @@ class CandidateDetector:
         ]
         for tid in expired_ids:
             del self.active_tracks[tid]
+            if tid in self.pending_track_losses:
+                del self.pending_track_losses[tid]
 
     def save_run_report(
         self,
