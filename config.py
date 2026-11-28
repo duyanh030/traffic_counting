@@ -88,6 +88,7 @@ COUNTING_LINE_POSITION = float(os.getenv("COUNTING_LINE_POSITION", "0.6"))
 # Candidate Detector / Active Learning parameters
 CANDIDATES_DIR = BASE_DIR / "candidates"
 REPORTS_DIR = BASE_DIR / "reports"
+LOGS_DIR = BASE_DIR / "logs"
 CVAT_EXPORTS_DIR = BASE_DIR / "cvat_exports"
 LOW_CONF_MIN = float(os.getenv("LOW_CONF_MIN", "0.20"))
 LOW_CONF_MAX = float(os.getenv("LOW_CONF_MAX", "0.38"))

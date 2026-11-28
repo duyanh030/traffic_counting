@@ -24,6 +24,7 @@ models/staging/
 # Active Learning candidate snapshots & run reports
 candidates/
 reports/
+logs/
 
 # Datasets & Training logs
 dataset/

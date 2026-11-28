@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 import os
 import re
 import time
@@ -21,40 +22,130 @@ def mask_url(url: str) -> str:
     return re.sub(r":([^@]+)@", ":****@", url)
 
 
-def print_debug_frame_info(frame_idx: int, detections, model, line_y: int):
-    """Print detailed per-vehicle tracking and crossing status to terminal when paused."""
-    print(f"\n{'='*28} [DEBUG FRAME #{frame_idx}] {'='*28}")
-    print(f"📍 Line Y-Coordinate: {line_y} px | Active Tracked Vehicles: {len(detections) if detections is not None else 0}")
-    print("-" * 72)
-    if detections is not None and len(detections) > 0 and detections.tracker_id is not None:
-        for cid, tid, conf, (x1, y1, x2, y2) in zip(
+def write_debug_log(log_path: Path | None, text: str, console: bool = True):
+    """Write text to terminal and append timestamped lines to the debug log file."""
+    if console:
+        print(text)
+    if log_path is not None:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                for line in text.split("\n"):
+                    f.write(f"[{now_str}] {line}\n")
+        except Exception as e:
+            if console:
+                print(f"⚠️ Failed to write to debug log file: {e}")
+
+
+def print_debug_frame_info(frame_idx: int, detections, model, line_y: int, line_zone=None, debug_log_path: Path = None):
+    """Print exhaustive per-vehicle tracking, anchor, and LineZone crossing status to terminal and log file."""
+    total_dets = len(detections) if (detections is not None and len(detections) > 0) else 0
+    in_cnt = line_zone.in_count if line_zone else 0
+    out_cnt = line_zone.out_count if line_zone else 0
+    anchors_desc = [a.name for a in line_zone.triggering_anchors] if line_zone else ["N/A"]
+
+    buf = []
+    buf.append(f"\n{'='*82}")
+    buf.append(f"🔍 [DEBUG FRAME #{frame_idx}] INTERACTIVE STEP-BY-STEP INSPECTOR")
+    buf.append(f"{'='*82}")
+    buf.append("📏 LINEZONE CONFIGURATION:")
+    if line_zone:
+        buf.append(f"  • Line Vector      : Start ({line_zone.vector.start.x:.0f}, {line_zone.vector.start.y:.0f}) ──► End ({line_zone.vector.end.x:.0f}, {line_zone.vector.end.y:.0f}) | Y = {line_y} px")
+        buf.append(f"  • Trigger Anchors  : {', '.join(anchors_desc)} ({len(anchors_desc)} points)")
+        buf.append(f"  • Current Counters : Total IN = {in_cnt} | Total OUT = {out_cnt}")
+    else:
+        buf.append(f"  • Line Y-Position  : {line_y} px")
+    buf.append("-" * 82)
+    buf.append(f"🚗 ACTIVE VEHICLE TRACKS (Detected: {total_dets}):")
+    buf.append("-" * 82)
+
+    if total_dets > 0 and detections.tracker_id is not None:
+        # Precompute LineZone anchor states if available
+        lz_in_limits = None
+        lz_has_left = None
+        lz_has_right = None
+        if line_zone is not None:
+            try:
+                lz_in_limits, lz_has_left, lz_has_right = line_zone._compute_anchor_sides(detections)
+            except Exception:
+                pass
+
+        for idx, (cid, tid, conf, (x1, y1, x2, y2)) in enumerate(zip(
             detections.class_id, detections.tracker_id, detections.confidence, detections.xyxy
-        ):
+        )):
             cname = model.names.get(cid, str(cid))
+            tid_int = int(tid)
+            w = int(x2 - x1)
+            h = int(y2 - y1)
+            aspect = round(w / h, 2) if h > 0 else 0.0
+
             y_top = int(y1)
             y_bot = int(y2)
-            delta_bot = y_bot - line_y
-            delta_top = y_top - line_y
+            y_mid = int((y1 + y2) / 2)
+            d_top = y_top - line_y
+            d_mid = y_mid - line_y
+            d_bot = y_bot - line_y
 
-            if y_bot < line_y:
-                pos_status = f"BEFORE Line ({delta_bot} px)"
-                crossed = "NO"
-            elif y_top <= line_y <= y_bot:
-                pos_status = f"STRADDLING Line [Dead-Zone] (Top: {delta_top}px | Bot: +{delta_bot}px)"
-                crossed = "STRADDLE"
+            # Anchor analysis
+            in_lim = bool(lz_in_limits[idx]) if lz_in_limits is not None else True
+            has_l = bool(lz_has_left[idx]) if lz_has_left is not None else (y_top < line_y)
+            has_r = bool(lz_has_right[idx]) if lz_has_right is not None else (y_bot >= line_y)
+            is_straddling = has_l and has_r
+
+            # Determine crossing status
+            if line_zone is not None:
+                confirmed_side = line_zone._confirmed_crossing_side.get(tid_int)
+                conf_side_str = "LEFT (Before Line)" if confirmed_side is True else "RIGHT (Past Line)" if confirmed_side is False else "NOT INITIALIZED"
+                history_list = list(line_zone.crossing_state_history.get(tid_int, []))
+
+                if confirmed_side is not None and not is_straddling:
+                    current_side = has_l  # True = Left, False = Right
+                    if current_side != confirmed_side:
+                        cross_status = "✅ CROSSED! (Transitioned across line)"
+                    else:
+                        cross_status = "STILL ON ORIGINAL SIDE (No crossing yet)"
+                elif is_straddling:
+                    cross_status = "⚠️ STRADDLING (In Dead-Zone: Head crossed, Tail has not)"
+                else:
+                    cross_status = "INITIALIZING (First frames on current side)"
             else:
-                pos_status = f"PAST Line (+{delta_top} px)"
-                crossed = "YES"
+                conf_side_str = "N/A"
+                history_list = []
+                cross_status = "PAST Line" if y_top >= line_y else "STRADDLING Line" if y_bot >= line_y else "BEFORE Line"
 
-            print(
-                f"[Frame {frame_idx}] ID #{tid:<3} ({cname:<10}) | BBox: [{int(x1)}, {int(y1)}, {int(x2)}, {int(y2)}] | "
-                f"Conf: {conf:.2f} | Y-dist to Line: {delta_bot:+d}px | Status: {pos_status} | Crossed: {crossed}"
-            )
+            buf.append(f"[TRACK #{idx+1}] ID: #{tid_int} | Class: {cname} (cid={cid}) | Confidence: {conf:.2f}")
+            buf.append(f"  ├─ Bounding Box   : [x1={int(x1)}, y1={int(y1)}, x2={int(x2)}, y2={int(y2)}] | W={w}px, H={h}px (Aspect: {aspect})")
+            buf.append(f"  ├─ Y-Dist to Line : Top Edge: {d_top:+d}px | Center: {d_mid:+d}px | Bottom Edge: {d_bot:+d}px (Y_line={line_y})")
+
+            # Detailed anchor points
+            buf.append(f"  ├─ Anchors & Sides: (In Limits: {in_lim})")
+            if line_zone is not None:
+                v_start_x = line_zone.vector.start.x
+                v_start_y = line_zone.vector.start.y
+                v_dx = line_zone.vector.end.x - v_start_x
+                v_dy = line_zone.vector.end.y - v_start_y
+
+                for anchor in line_zone.triggering_anchors:
+                    pt = detections[idx:idx+1].get_anchors_coordinates(anchor)[0]
+                    cp = v_dx * (pt[1] - v_start_y) - v_dy * (pt[0] - v_start_x)
+                    side_name = "LEFT  (Before/Above Line)" if cp < 0 else "RIGHT (Past/Below Line)"
+                    buf.append(f"  │   • {anchor.name:<13} at ({pt[0]:.1f}, {pt[1]:.1f}) ──► Side: {side_name} (cp={cp:+.0f})")
+
+            buf.append(f"  ├─ Side Summary   : Has Left Anchors = {has_l} | Has Right Anchors = {has_r}")
+            if is_straddling:
+                buf.append("  │   ⚠️ DEAD-ZONE ALERT: Vehicle spans both sides! LineZone 'if has_left and has_right: continue' is SKIPPING count updates!")
+            buf.append("  └─ LineZone State :")
+            buf.append(f"      • Confirmed Origin Side : {conf_side_str}")
+            buf.append(f"      • Crossing History Queue: {history_list} (len={len(history_list)}/{line_zone.crossing_history_length if line_zone else '?'})")
+            buf.append(f"      • Status Verdict        : {cross_status}\n")
     else:
-        print("  (No tracked vehicles detected in this frame)")
-    print("-" * 72)
-    print("👉 Debug Controls: [Space] Tiếp tục / Tạm dừng | [D] Tua 1 Frame tiếp | [Q] Thoát")
-    print("=" * 72)
+        buf.append("  (No tracked vehicles detected in this frame)\n")
+
+    buf.append("-" * 82)
+    buf.append("👉 Debug Controls: [Space] Tiếp tục / Tạm dừng | [D] Tua 1 Frame tiếp | [Q] Thoát")
+    buf.append("=" * 82)
+
+    write_debug_log(debug_log_path, "\n".join(buf), console=True)
 
 
 def parse_arguments():
@@ -178,8 +269,8 @@ def main():
     line_y = int(height * line_pos)
     print(f"Counting line position: y={line_y} ({line_pos * 100:.1f}% frame height)")
     line_zone = sv.LineZone(
-        start=sv.Point(30, line_y),
-        end=sv.Point(width - 30, line_y)
+        start=sv.Point(0, line_y),
+        end=sv.Point(width , line_y)
     )
 
     # Initialize annotation tools
@@ -201,13 +292,28 @@ def main():
     # Dictionary to maintain smoothed/majority class for each vehicle track
     track_class_history = {}  # {tracker_id: {class_id: count}}
 
-    # Interactive Step-by-Step Debug state
+    # Interactive Step-by-Step Debug state & file logger
     is_paused = False
+    debug_log_file = None
     if args.debug:
-        print("\n🔧 [DEBUG MODE ACTIVATED] Step-by-Step Frame Inspection:")
-        print("   • Press [Space] : Tạm dừng (Pause) / Tiếp tục (Resume)")
-        print("   • Press [D]     : Tua tới đúng 1 frame tiếp theo")
-        print("   • Press [Q]     : Thoát chương trình\n")
+        config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        # Format: debug_<source_name>_YYYYMMDD_HHMMSS.log
+        debug_log_file = config.LOGS_DIR / f"debug_{source_name}_{start_timestamp}.log"
+        init_banner = (
+            f"\n{'='*82}\n"
+            f"🚀 [DEBUG SESSION INITIALIZED]\n"
+            f"• Script Start Time : {start_time_str}\n"
+            f"• Video Source      : {source} (Resolution: {width}x{height})\n"
+            f"• Model             : {model_name} (Version: {semantic_ver})\n"
+            f"• Line Y-Position   : {line_y} px ({line_pos * 100:.1f}% frame height)\n"
+            f"• Debug Log File    : {debug_log_file}\n"
+            f"• Interactive Keys  :\n"
+            f"  - Press [Space]   : Tạm dừng (Pause) / Tiếp tục (Resume)\n"
+            f"  - Press [D]       : Tua tới đúng 1 frame tiếp theo\n"
+            f"  - Press [Q]       : Thoát chương trình\n"
+            f"{'='*82}"
+        )
+        write_debug_log(debug_log_file, init_banner, console=True)
 
     try:
         while cap.isOpened():
@@ -301,33 +407,34 @@ def main():
 
                 if args.debug:
                     if is_paused:
-                        print_debug_frame_info(frame_idx, detections, model, line_y)
+                        print_debug_frame_info(frame_idx, detections, model, line_y, line_zone=line_zone, debug_log_path=debug_log_file)
                         user_quit = False
                         while is_paused:
                             k = cv2.waitKey(0) & 0xFF
                             if k == ord(" "):
                                 is_paused = False
-                                print("▶️ Resumed video playback.")
+                                write_debug_log(debug_log_file, f"▶️ User RESUMED video playback from Frame #{frame_idx}.", console=True)
                                 break
                             elif k in (ord("d"), ord("D")):
+                                write_debug_log(debug_log_file, f"⏩ User STEPPED 1 frame to Frame #{frame_idx + 1}.", console=True)
                                 # Advance exactly 1 frame; keep is_paused = True for next frame
                                 break
                             elif k in (ord("q"), ord("Q")):
                                 user_quit = True
+                                write_debug_log(debug_log_file, f"⏹️ User STOPPED playback at Frame #{frame_idx}.", console=True)
                                 break
                         if user_quit:
-                            print("\n⏹️ Stopped by user.")
                             break
                     else:
                         k = cv2.waitKey(1) & 0xFF
                         if k == ord(" "):
                             is_paused = True
-                            print(f"\n⏸️ Paused at Frame #{frame_idx}.")
+                            write_debug_log(debug_log_file, f"\n⏸️ User PAUSED video at Frame #{frame_idx}.", console=True)
                         elif k in (ord("d"), ord("D")):
                             is_paused = True
-                            print(f"\n⏸️ Stepping at Frame #{frame_idx}.")
+                            write_debug_log(debug_log_file, f"\n⏸️ User STEPPED into Frame #{frame_idx}.", console=True)
                         elif k in (ord("q"), ord("Q")):
-                            print("\n⏹️ Stopped by user.")
+                            write_debug_log(debug_log_file, f"\n⏹️ User STOPPED playback at Frame #{frame_idx}.", console=True)
                             break
                 else:
                     if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -342,6 +449,20 @@ def main():
     end_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
     duration_seconds = end_time - start_time
     avg_fps = round(frame_idx / duration_seconds, 2) if duration_seconds > 0 else 0
+
+    if args.debug and debug_log_file is not None:
+        end_banner = (
+            f"\n{'='*82}\n"
+            f"⏹️ [DEBUG SESSION COMPLETED]\n"
+            f"• Session Start Time : {start_time_str}\n"
+            f"• Session End Time   : {end_time_str}\n"
+            f"• Total Duration     : {duration_seconds:.2f} seconds | Avg FPS: {avg_fps}\n"
+            f"• Total Frames Done  : {frame_idx}\n"
+            f"• Vehicles Counted   : IN = {line_zone.in_count} | OUT = {line_zone.out_count}\n"
+            f"• Debug Log Saved To : {debug_log_file}\n"
+            f"{'='*82}"
+        )
+        write_debug_log(debug_log_file, end_banner, console=True)
 
     # Save detailed run report
     saved_report = None
