@@ -21,6 +21,42 @@ def mask_url(url: str) -> str:
     return re.sub(r":([^@]+)@", ":****@", url)
 
 
+def print_debug_frame_info(frame_idx: int, detections, model, line_y: int):
+    """Print detailed per-vehicle tracking and crossing status to terminal when paused."""
+    print(f"\n{'='*28} [DEBUG FRAME #{frame_idx}] {'='*28}")
+    print(f"📍 Line Y-Coordinate: {line_y} px | Active Tracked Vehicles: {len(detections) if detections is not None else 0}")
+    print("-" * 72)
+    if detections is not None and len(detections) > 0 and detections.tracker_id is not None:
+        for cid, tid, conf, (x1, y1, x2, y2) in zip(
+            detections.class_id, detections.tracker_id, detections.confidence, detections.xyxy
+        ):
+            cname = model.names.get(cid, str(cid))
+            y_top = int(y1)
+            y_bot = int(y2)
+            delta_bot = y_bot - line_y
+            delta_top = y_top - line_y
+
+            if y_bot < line_y:
+                pos_status = f"BEFORE Line ({delta_bot} px)"
+                crossed = "NO"
+            elif y_top <= line_y <= y_bot:
+                pos_status = f"STRADDLING Line [Dead-Zone] (Top: {delta_top}px | Bot: +{delta_bot}px)"
+                crossed = "STRADDLE"
+            else:
+                pos_status = f"PAST Line (+{delta_top} px)"
+                crossed = "YES"
+
+            print(
+                f"[Frame {frame_idx}] ID #{tid:<3} ({cname:<10}) | BBox: [{int(x1)}, {int(y1)}, {int(x2)}, {int(y2)}] | "
+                f"Conf: {conf:.2f} | Y-dist to Line: {delta_bot:+d}px | Status: {pos_status} | Crossed: {crossed}"
+            )
+    else:
+        print("  (No tracked vehicles detected in this frame)")
+    print("-" * 72)
+    print("👉 Debug Controls: [Space] Tiếp tục / Tạm dừng | [D] Tua 1 Frame tiếp | [Q] Thoát")
+    print("=" * 72)
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Real-time Traffic Counting & Active Learning Candidate Capture")
     parser.add_argument(
@@ -63,6 +99,11 @@ def parse_arguments():
         type=int,
         default=0,
         help="Limit number of frames to process for quick benchmark/testing (0 = full video/stream)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable interactive Step-by-Step debug mode (Space: Pause/Resume, D: Step 1 frame, with terminal inspector)",
     )
     return parser.parse_args()
 
@@ -160,6 +201,14 @@ def main():
     # Dictionary to maintain smoothed/majority class for each vehicle track
     track_class_history = {}  # {tracker_id: {class_id: count}}
 
+    # Interactive Step-by-Step Debug state
+    is_paused = False
+    if args.debug:
+        print("\n🔧 [DEBUG MODE ACTIVATED] Step-by-Step Frame Inspection:")
+        print("   • Press [Space] : Tạm dừng (Pause) / Tiếp tục (Resume)")
+        print("   • Press [D]     : Tua tới đúng 1 frame tiếp theo")
+        print("   • Press [Q]     : Thoát chương trình\n")
+
     try:
         while cap.isOpened():
             ret, frame = cap.read()
@@ -235,10 +284,55 @@ def main():
 
             # Display window (unless running in headless mode)
             if not args.no_view:
+                if args.debug:
+                    status_lbl = f"[DEBUG PAUSED] Frame #{frame_idx}" if is_paused else f"[DEBUG ACTIVE] Frame #{frame_idx}"
+                    lbl_color = (0, 0, 255) if is_paused else (0, 255, 0)
+                    cv2.putText(
+                        annotated_frame,
+                        f"{status_lbl} | Space: Pause/Resume | D: Next Frame | Q: Quit",
+                        (30, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        lbl_color,
+                        2,
+                    )
+
                 cv2.imshow("Traffic Counting & Active Learning", annotated_frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("\n⏹️ Stopped by user.")
-                    break
+
+                if args.debug:
+                    if is_paused:
+                        print_debug_frame_info(frame_idx, detections, model, line_y)
+                        user_quit = False
+                        while is_paused:
+                            k = cv2.waitKey(0) & 0xFF
+                            if k == ord(" "):
+                                is_paused = False
+                                print("▶️ Resumed video playback.")
+                                break
+                            elif k in (ord("d"), ord("D")):
+                                # Advance exactly 1 frame; keep is_paused = True for next frame
+                                break
+                            elif k in (ord("q"), ord("Q")):
+                                user_quit = True
+                                break
+                        if user_quit:
+                            print("\n⏹️ Stopped by user.")
+                            break
+                    else:
+                        k = cv2.waitKey(1) & 0xFF
+                        if k == ord(" "):
+                            is_paused = True
+                            print(f"\n⏸️ Paused at Frame #{frame_idx}.")
+                        elif k in (ord("d"), ord("D")):
+                            is_paused = True
+                            print(f"\n⏸️ Stepping at Frame #{frame_idx}.")
+                        elif k in (ord("q"), ord("Q")):
+                            print("\n⏹️ Stopped by user.")
+                            break
+                else:
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        print("\n⏹️ Stopped by user.")
+                        break
     finally:
         cap.release()
         if not args.no_view:
